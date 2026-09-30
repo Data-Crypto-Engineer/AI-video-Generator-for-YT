@@ -1,0 +1,23 @@
+# Core Frameworks
+crewai>=0.80.0
+streamlit>=1.38.0
+pydantic>=2.7.0
+
+# AI Models & SDKs
+google-genai>=0.1.1
+requests>=2.32.0
+urllib3>=2.0.0
+
+# Media Processing
+pillow>=10.4.0
+pyyaml>=6.0.2
+python-dotenv>=1.0.1
+
+# YouTube Data API v3 (V2 Pipeline)
+google-api-python-client>=2.140.0
+google-auth>=2.34.0
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
+
+# Testing
+pytest>=8.0.0

@@ -1,0 +1,93 @@
+analyze_script_task:
+  description: >
+    Analyze the user's raw script: "{script}".
+    Target style: "{style}". Target voice: "{voice}". Aspect ratio: "{aspect_ratio}".
+    Deconstruct the script into a coherent sequence of scenes. For each scene, specify:
+    1. Scene index and narration text
+    2. Visual prompt for Cloudflare FLUX (composition, lighting, camera angle, subject, color grading)
+    3. Estimated duration (calculated from narration word count, ~130-150 wpm)
+    4. Camera motion (e.g. slow_zoom_in, slow_zoom_out, pan_left, pan_right)
+    5. Scene transition (cut, crossfade, dissolve)
+    6. Music mood and sound effect cues
+    Output the result as a strictly validated JSON matching the ProductionPlan schema.
+  expected_output: >
+    A valid JSON string conforming to the ProductionPlan schema containing project metadata,
+    scenes array, thumbnail concept, and initial metadata.
+  agent: director_agent
+
+generate_visuals_task:
+  description: >
+    Iterate through each scene in the production plan.
+    Refine the visual prompt for Cloudflare FLUX Schnell.
+    Invoke the Cloudflare image generation service.
+    Validate the image format, resolution, and non-empty byte payload.
+    Save into workspace/scenes/scene_XXX/visual.png and write scene metadata.
+  expected_output: >
+    Structured manifest mapping scene IDs to their generated image paths and status.
+  agent: visual_agent
+
+generate_narration_task:
+  description: >
+    Iterate through each scene in the production plan.
+    Call Gemini 3.8 Flash-Lite TTS with voice "{voice}" and documentary style direction.
+    Validate that each scene returns valid WAV audio (RIFF header, >0 duration).
+    Save into workspace/audio/scene_XXX.wav and record audio duration.
+  expected_output: >
+    Structured audio manifest mapping scene IDs to validated WAV audio paths and durations.
+  agent: voice_agent
+
+create_audio_plan_task:
+  description: >
+    Formulate a structured audio plan for the video based on scene durations, narration timing,
+    and the Director's music mood.
+    Scan available licensed music and SFX in the local library.
+    Calculate ducking levels (e.g. 0.10 during narration, 0.25 during pauses) and fade timings.
+    If no track matches, emit an intelligent fallback recommendation with suggested themes.
+  expected_output: >
+    A validated AudioPlan JSON containing music selection, ducking config, SFX placements, or fallback advice.
+  agent: music_agent
+
+assemble_video_task:
+  description: >
+    Construct the FFmpeg command sequence and execute the deterministic render pipeline.
+    Combine scene images with Ken Burns zoom/pan filters, transitions, narration audio,
+    mixed/ducked background music, sound effects, and synchronized SRT subtitles.
+    Render the final broadcast-grade MP4 at 1080p (or 720p).
+  expected_output: >
+    Path to the finalized rendered MP4 video and execution logs.
+  agent: editor_agent
+
+inspect_production_task:
+  description: >
+    Perform rigorous forensic QC on the finalized video and manifest using ffprobe.
+    Check:
+    - Every scene has narration and valid visual
+    - No missing or discontinuous scenes
+    - Final MP4 exists, video stream is H.264, audio stream is AAC
+    - Resolution matches target (1920x1080 or 1280x720)
+    - Subtitle track/file is present and synchronized
+    - Distinguish between fatal and non-fatal warnings
+  expected_output: >
+    A QAResult JSON with status PASS or FAIL, error lists, and diagnostic metrics.
+  agent: qa_agent
+
+generate_thumbnail_task:
+  description: >
+    Extract the most compelling visual hook from the script and production plan.
+    Generate a high-impact 16:9 thumbnail base using Cloudflare FLUX.
+    Render high-contrast, bold YouTube thumbnail text overlay using PIL/Pillow.
+    Generate optimized YouTube title, description with timestamps, and tags.
+  expected_output: >
+    Path to the thumbnail.jpg image and complete VideoPackaging metadata JSON.
+  agent: thumbnail_agent
+
+publish_youtube_task:
+  description: >
+    (V2 Pipeline Only) Authenticate with YouTube Data API v3 using OAuth 2.0.
+    Upload the final MP4 video with resumable protocol.
+    Set title, description, tags, and specified privacy status (Private/Unlisted/Public).
+    Upload the custom thumbnail.
+    Return the YouTube video ID and watch URL.
+  expected_output: >
+    YouTubePublishResult JSON with video_id, url, and status.
+  agent: youtube_agent

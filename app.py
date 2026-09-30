@@ -1,0 +1,335 @@
+import os
+import json
+import uuid
+import streamlit as st
+from utils.filesystem import WorkspaceManager
+from crew.flow import VideoProductionFlow
+from tools.ffmpeg_tool import FFmpegTool
+from utils.gemini_client import GeminiReasoningClient
+
+# Streamlit Page Setup
+st.set_page_config(
+    page_title="AI Video Production Agent",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom Styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.2rem;
+        font-weight: 800;
+        background: linear-gradient(90deg, #6366F1, #A855F7, #EC4899);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.2rem;
+    }
+    .sub-header {
+        font-size: 1.05rem;
+        color: #94A3B8;
+        margin-bottom: 1.5rem;
+    }
+    .agent-card {
+        background-color: #1E293B;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 8px;
+        border-left: 4px solid #6366F1;
+    }
+    .stButton>button {
+        background: linear-gradient(90deg, #6366F1, #8B5CF6);
+        color: white;
+        font-weight: 600;
+        border: none;
+        border-radius: 8px;
+        padding: 0.6rem 1.4rem;
+        transition: all 0.2s ease-in-out;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Load secrets into environment safely if running inside Streamlit
+if "CLOUDFLARE_ACCOUNT_ID" in st.secrets:
+    os.environ["CLOUDFLARE_ACCOUNT_ID"] = st.secrets["CLOUDFLARE_ACCOUNT_ID"]
+if "CLOUDFLARE_API_TOKEN" in st.secrets:
+    os.environ["CLOUDFLARE_API_TOKEN"] = st.secrets["CLOUDFLARE_API_TOKEN"]
+if "GEMINI_API_KEY" in st.secrets:
+    os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
+if "YOUTUBE_CLIENT_ID" in st.secrets:
+    os.environ["YOUTUBE_CLIENT_ID"] = st.secrets["YOUTUBE_CLIENT_ID"]
+if "YOUTUBE_CLIENT_SECRET" in st.secrets:
+    os.environ["YOUTUBE_CLIENT_SECRET"] = st.secrets["YOUTUBE_CLIENT_SECRET"]
+if "YOUTUBE_REFRESH_TOKEN" in st.secrets:
+    os.environ["YOUTUBE_REFRESH_TOKEN"] = st.secrets["YOUTUBE_REFRESH_TOKEN"]
+
+# Session State Initialization
+if "project_id" not in st.session_state:
+    st.session_state.project_id = str(uuid.uuid4())
+if "flow_state" not in st.session_state:
+    st.session_state.flow_state = None
+if "logs" not in st.session_state:
+    st.session_state.logs = []
+if "v2_result" not in st.session_state:
+    st.session_state.v2_result = None
+
+# Sidebar Diagnostics
+with st.sidebar:
+    st.image("https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?auto=format&fit=crop&w=600&q=80", use_container_width=True)
+    st.markdown("### 🛠️ System Diagnostics")
+    
+    # Check FFmpeg
+    ffmpeg_tool = FFmpegTool()
+    ff_ok, ff_info = ffmpeg_tool.check_availability()
+    if ff_ok:
+        st.success("✓ FFmpeg 4.4+ Ready")
+    else:
+        st.error("✗ FFmpeg Not Found")
+
+    # Check Cloudflare
+    cf_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    cf_acc = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    if cf_token and cf_acc:
+        st.success("✓ Cloudflare FLUX Configured")
+    else:
+        st.warning("⚠️ Cloudflare credentials missing")
+
+    # Check Gemini
+    gem_key = os.environ.get("GEMINI_API_KEY")
+    if gem_key:
+        st.success("✓ Gemini TTS & Reasoning Configured")
+    else:
+        st.error("✗ GEMINI_API_KEY missing")
+
+    # YouTube V2 Status
+    yt_conf = bool(os.environ.get("YOUTUBE_CLIENT_ID") and os.environ.get("YOUTUBE_REFRESH_TOKEN"))
+    if yt_conf:
+        st.info("✓ YouTube V2 OAuth Configured")
+    else:
+        st.caption("ℹ️ YouTube V2: Dry-run / Sandbox Mode")
+
+    st.markdown("---")
+    st.markdown("### 🤖 8 Production Agents")
+    st.caption("1. **Director**: Screenplay & Scene Decomposition\n2. **Visual**: Cloudflare FLUX-1-Schnell\n3. **Voice**: Google Gemini 3.8 Flash-Lite TTS\n4. **Music/SFX**: Licensed Library & Ducking\n5. **Editor**: Deterministic FFmpeg Assembly\n6. **QA**: Forensic stream QC & ffprobe\n7. **Thumbnail**: High-CTR Art & Packaging\n8. **YouTube**: V2 OAuth2 Distribution")
+
+# Main Header
+st.markdown('<div class="main-header">AI VIDEO PRODUCTION AGENT</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Transform any raw script into a broadcast-ready narrated documentary with FLUX visuals, Gemini TTS, and FFmpeg assembly.</div>', unsafe_allow_html=True)
+
+# Sample Scripts
+SAMPLE_SCRIPTS = {
+    "Deep Sea Bioluminescence": "Miles beneath the ocean surface lies an alien world where sunlight has never touched. In this perpetual abyss, creatures illuminate the dark with living fire—chemical lights called bioluminescence. Some flash to attract prey, others to blind predators in the ink-black depths. Life here thrives under pressures that would crush steel submarines.",
+    "The Origin of Black Holes": "When a star twenty times more massive than our sun runs out of nuclear fuel, its core collapses under gravity in a fraction of a second. The resulting supernova tears the outer layers apart, leaving behind a gravitational singularity so dense that not even light can escape its event horizon. Here, physics as we understand it simply breaks down.",
+    "Ancient Lost Cities": "Deep within the dense Amazon rainforest, modern LiDAR scans have pierced through centuries of dense canopy to reveal vast networks of forgotten civilization. Pyramids, canals, and ancient causeways tell the story of millions who lived here thousands of years before Columbus. History is being rewritten one laser pulse at a time."
+}
+
+col_sample, col_clear = st.columns([4, 1])
+with col_sample:
+    selected_sample = st.selectbox("Load sample script:", ["(Custom Script)"] + list(SAMPLE_SCRIPTS.keys()))
+with col_clear:
+    if st.button("New Project"):
+        st.session_state.project_id = str(uuid.uuid4())
+        st.session_state.flow_state = None
+        st.session_state.logs = []
+        st.session_state.v2_result = None
+        st.rerun()
+
+initial_text = SAMPLE_SCRIPTS[selected_sample] if selected_sample != "(Custom Script)" else ""
+
+# Input Form
+script_input = st.text_area(
+    "Paste your script:",
+    value=initial_text,
+    height=160,
+    placeholder="Enter the screenplay or script narration here..."
+)
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    style_option = st.selectbox(
+        "Video style:",
+        [
+            "Cinematic Documentary",
+            "Deep Space Odyssey",
+            "Historical Mystery",
+            "Nature & Wildlife",
+            "Cyberpunk Sci-Fi",
+            "Tech Explainer"
+        ]
+    )
+
+with col2:
+    voice_option = st.selectbox(
+        "Narrator Voice (Gemini TTS):",
+        ["Kore (Warm/Documentary)", "Puck (Engaging/Expressive)", "Fenrir (Authoritative/Deep)", "Aoede (Poetic/Reflective)"]
+    )
+    voice_name = voice_option.split()[0]
+
+with col3:
+    aspect_option = st.selectbox(
+        "Aspect ratio:",
+        ["16:9 (Landscape YouTube)", "9:16 (Shorts/Reels)"]
+    )
+    aspect_ratio = "16:9" if "16:9" in aspect_option else "9:16"
+
+with col4:
+    res_option = st.selectbox(
+        "Output resolution:",
+        ["1080p (Full HD)", "720p (HD)"]
+    )
+    resolution = "1080p" if "1080p" in res_option else "720p"
+
+# Create Video Action Button
+start_production = st.button("🚀 CREATE VIDEO", use_container_width=True)
+
+if start_production:
+    if not script_input.strip():
+        st.error("Please enter a script before starting production.")
+    else:
+        st.session_state.logs = []
+        progress_bar = st.progress(0.0)
+        status_box = st.empty()
+
+        def on_progress(stage: str, msg: str, pct: float):
+            progress_bar.progress(min(1.0, max(0.0, pct)))
+            status_box.markdown(f"**Stage [{stage}]**: {msg}")
+            st.session_state.logs.append(f"[{stage}] {msg}")
+
+        flow = VideoProductionFlow(st.session_state.project_id, progress_callback=on_progress)
+        
+        with st.spinner("AI agents collaborating on your video..."):
+            flow_state = flow.run_v1_pipeline(
+                script=script_input,
+                style=style_option,
+                voice_name=voice_name,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution
+            )
+            st.session_state.flow_state = flow_state
+            st.rerun()
+
+# Display Production Results
+state: Optional[FlowState] = st.session_state.flow_state
+
+if state:
+    if state.is_completed and state.video_path and os.path.exists(state.video_path):
+        st.markdown("---")
+        st.success("🎉 **VIDEO READY** — Production Completed Successfully!")
+
+        col_vid, col_meta = st.columns([3, 2])
+
+        with col_vid:
+            st.markdown("### 🎬 Final Rendered MP4")
+            with open(state.video_path, "rb") as vf:
+                video_bytes = vf.read()
+                st.video(video_bytes)
+
+            col_d1, col_d2, col_d3 = st.columns(3)
+            with col_d1:
+                st.download_button(
+                    "⬇️ Download MP4",
+                    data=video_bytes,
+                    file_name=f"video_{state.project_id[:8]}.mp4",
+                    mime="video/mp4",
+                    use_container_width=True
+                )
+            with col_d2:
+                if state.thumbnail_path and os.path.exists(state.thumbnail_path):
+                    with open(state.thumbnail_path, "rb") as tf:
+                        st.download_button(
+                            "⬇️ Thumbnail JPG",
+                            data=tf.read(),
+                            file_name=f"thumbnail_{state.project_id[:8]}.jpg",
+                            mime="image/jpeg",
+                            use_container_width=True
+                        )
+            with col_d3:
+                wm = WorkspaceManager(state.project_id)
+                manifest_data = wm.load_manifest()
+                if manifest_data:
+                    st.download_button(
+                        "⬇️ Manifest JSON",
+                        data=json.dumps(manifest_data, indent=2),
+                        file_name=f"manifest_{state.project_id[:8]}.json",
+                        mime="application/json",
+                        use_container_width=True
+                    )
+
+        with col_meta:
+            if state.thumbnail_path and os.path.exists(state.thumbnail_path):
+                st.markdown("### 🖼️ YouTube Thumbnail")
+                st.image(state.thumbnail_path, use_container_width=True)
+
+            if state.packaging and state.packaging.metadata:
+                st.markdown("### 🏷️ YouTube Packaging")
+                st.text_input("Title:", value=state.packaging.metadata.title, disabled=True)
+                st.text_area("Description:", value=state.packaging.metadata.description, height=120, disabled=True)
+                st.caption(f"**Tags:** {', '.join(state.packaging.metadata.tags[:8])}")
+
+        # QA Report Accordion
+        if state.qa_result:
+            with st.expander("🔍 QA Forensic Audit Report", expanded=False):
+                qa = state.qa_result
+                st.metric("QA Score", f"{qa.score}%", delta=qa.status.value)
+                for check in qa.checks:
+                    icon = "✅" if check.passed else ("❌" if check.is_fatal else "⚠️")
+                    st.write(f"{icon} **[{check.category.upper()}] {check.check_name}**: {check.details}")
+
+        # Scene Breakdown Accordion
+        if state.plan and state.plan.scenes:
+            with st.expander(f"🎞️ Scene-by-Scene Breakdown ({len(state.plan.scenes)} Scenes)", expanded=False):
+                for s in state.plan.scenes:
+                    sc1, sc2, sc3 = st.columns([1, 2, 1])
+                    with sc1:
+                        if s.visual_path and os.path.exists(s.visual_path):
+                            st.image(s.visual_path, caption=f"Scene {s.id}")
+                    with sc2:
+                        st.markdown(f"**Scene {s.id}** ({s.audio_duration or s.duration:.1f}s)")
+                        st.write(f"_{s.narration}_")
+                        st.caption(f"**Motion:** {s.camera_motion.value if hasattr(s.camera_motion, 'value') else s.camera_motion} | **Transition:** {s.transition.value if hasattr(s.transition, 'value') else s.transition}")
+                    with sc3:
+                        if s.audio_path and os.path.exists(s.audio_path):
+                            with open(s.audio_path, "rb") as af:
+                                st.audio(af.read(), format="audio/wav")
+
+        # VERSION 2: YouTube Publisher
+        st.markdown("---")
+        st.markdown("### 🚀 Version 2: YouTube Distribution")
+        st.caption("Publish the finalized MP4, custom thumbnail, and SEO metadata directly to your YouTube channel.")
+
+        c_priv, c_pub = st.columns([2, 3])
+        with c_priv:
+            privacy_choice = st.selectbox(
+                "Release Privacy:",
+                ["private (Recommended for review)", "unlisted", "public"]
+            )
+            privacy_val = privacy_choice.split()[0]
+        with c_pub:
+            st.markdown("<br>", unsafe_allow_html=True)
+            publish_btn = st.button("📤 UPLOAD TO YOUTUBE", use_container_width=True)
+
+        if publish_btn:
+            with st.spinner("Publishing video and thumbnail to YouTube..."):
+                flow = VideoProductionFlow(state.project_id)
+                yt_res = flow.run_v2_publish(privacy_status=privacy_val)
+                st.session_state.v2_result = yt_res
+
+        if st.session_state.v2_result:
+            res = st.session_state.v2_result
+            if res.get("success"):
+                st.success(f"✅ {res.get('message')}")
+                st.markdown(f"**YouTube URL:** [{res.get('url')}]({res.get('url')})")
+                st.caption(f"Video ID: `{res.get('video_id')}` | Privacy: `{res.get('privacy_status')}`")
+            else:
+                st.error(f"Upload failed: {res.get('message')}")
+
+    elif state.stage == "failed":
+        st.error(f"Production halted at stage: **{state.stage}**")
+        for err in state.errors:
+            st.code(err, language="text")

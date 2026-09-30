@@ -1,0 +1,59 @@
+app:
+  name: "AI Video Production Agent"
+  version: "1.0.0"
+  default_aspect_ratio: "16:9"
+  default_resolution: "1080p"
+  resolutions:
+    "1080p":
+      width: 1920
+      height: 1080
+      video_bitrate: "6000k"
+      audio_bitrate: "192k"
+      fps: 30
+    "720p":
+      width: 1280
+      height: 720
+      video_bitrate: "3500k"
+      audio_bitrate: "128k"
+      fps: 30
+
+models:
+  reasoning:
+    primary: "gemini-3.8-flash"
+    fallback: "gemini-3.1-flash-lite"
+    temperature: 0.3
+  visual:
+    provider: "cloudflare"
+    model: "@cf/black-forest-labs/flux-1-schnell"
+    num_steps: 4
+  tts:
+    provider: "gemini"
+    model: "gemini-3.8-flash-lite-tts"
+    default_voice: "Kore"
+    available_voices:
+      - name: "Kore"
+        tone: "Warm, calm, soothing documentary narration"
+      - name: "Puck"
+        tone: "Engaging, conversational, expressive"
+      - name: "Fenrir"
+        tone: "Deep, authoritative, historical documentary"
+      - name: "Aoede"
+        tone: "Elegant, reflective, poetic delivery"
+
+audio:
+  narration_volume: 1.0
+  music_ducked_volume: 0.10
+  music_ambient_volume: 0.25
+  sfx_volume: 0.18
+  music_fade_in: 2.0
+  music_fade_out: 3.0
+
+rendering:
+  burn_subtitles: true
+  generate_srt: true
+  ken_burns_motion: true
+  crossfade_duration: 0.8
+
+youtube:
+  default_privacy: "private"
+  category_id: "27" # Education
