@@ -1,17 +1,23 @@
 import os
-import json
 import base64
+import json
 import urllib.request
 import urllib.error
-from typing import Optional, Dict, Any
+from abc import ABC, abstractmethod
+from typing import Optional, Tuple
 from utils.logging import get_logger
 from utils.retry import retry_with_backoff, PermanentPipelineError, TransientPipelineError
 
 logger = get_logger("cloudflare_image_tool")
 
-class CloudflareImageTool:
+class ImageProvider(ABC):
+    @abstractmethod
+    def generate_image(self, prompt: str, output_path: str, aspect_ratio: str = "16:9") -> Tuple[bool, str]:
+        pass
+
+class CloudflareFluxProvider(ImageProvider):
     """
-    Cloudflare Workers AI FLUX Schnell Image Generation Tool.
+    Production image generation via Cloudflare Workers AI:
     Model: @cf/black-forest-labs/flux-1-schnell
     """
     def __init__(self, account_id: Optional[str] = None, api_token: Optional[str] = None):
@@ -20,65 +26,63 @@ class CloudflareImageTool:
         self.model = "@cf/black-forest-labs/flux-1-schnell"
         self.api_url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.model}"
 
-    @retry_with_backoff(max_retries=3, initial_delay=2.0)
-    def generate_image(self, prompt: str, output_path: str, steps: int = 4) -> str:
+    @retry_with_backoff(max_retries=3, initial_delay=1.5, retry_on=(TransientPipelineError,))
+    def generate_image(self, prompt: str, output_path: str, aspect_ratio: str = "16:9") -> Tuple[bool, str]:
         if not self.account_id or not self.api_token:
-            raise PermanentPipelineError("CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN is missing.")
+            raise PermanentPipelineError("Cloudflare credentials missing (CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN)")
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         payload = {
-            "prompt": prompt,
-            "num_steps": min(max(steps, 4), 8)
+            "prompt": prompt
         }
         data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": "application/json",
+            "User-Agent": "ai-video-agent/1.0"
+        }
 
-        req = urllib.request.Request(
-            self.api_url,
-            data=data,
-            headers={
-                "Authorization": f"Bearer {self.api_token}",
-                "Content-Type": "application/json"
-            },
-            method="POST"
-        )
+        req = urllib.request.Request(self.api_url, data=data, headers=headers, method="POST")
 
         try:
             with urllib.request.urlopen(req, timeout=45) as response:
-                content_type = response.headers.get("Content-Type", "")
                 resp_bytes = response.read()
+                resp_json = json.loads(resp_bytes.decode("utf-8"))
 
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                if not resp_json.get("success", False) and "result" not in resp_json:
+                    errors = resp_json.get("errors", [])
+                    err_msg = errors[0].get("message") if errors else "Unknown Cloudflare AI error"
+                    logger.error(f"Cloudflare API returned error: {err_msg}")
+                    raise TransientPipelineError(f"Cloudflare API error: {err_msg}")
 
-                if "image/" in content_type:
-                    with open(output_path, "wb") as f:
-                        f.write(resp_bytes)
-                else:
-                    try:
-                        resp_json = json.loads(resp_bytes.decode("utf-8"))
-                        if "result" in resp_json and "image" in resp_json["result"]:
-                            img_b64 = resp_json["result"]["image"]
-                            img_data = base64.b64decode(img_b64)
-                            with open(output_path, "wb") as f:
-                                f.write(img_data)
-                        else:
-                            raise PermanentPipelineError(f"Unexpected Cloudflare response format: {resp_json}")
-                    except Exception as json_err:
-                        with open(output_path, "wb") as f:
-                            f.write(resp_bytes)
+                img_b64 = resp_json.get("result", {}).get("image")
+                if not img_b64:
+                    raise TransientPipelineError("No image data returned in Cloudflare response")
 
-                if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
-                    raise TransientPipelineError(f"Generated image empty or corrupt: {output_path}")
+                img_bytes = base64.b64decode(img_b64)
+                if len(img_bytes) < 1000:
+                    raise TransientPipelineError(f"Generated image suspiciously small: {len(img_bytes)} bytes")
 
-                logger.info(f"Successfully generated visual: {output_path} ({os.path.getsize(output_path)} bytes)")
-                return output_path
+                with open(output_path, "wb") as f:
+                    f.write(img_bytes)
 
-        except urllib.error.HTTPError as http_err:
-            if http_err.code in (401, 403):
-                raise PermanentPipelineError(f"Cloudflare authentication failed (HTTP {http_err.code}). Check credentials.")
-            elif http_err.code in (429, 500, 502, 503, 504):
-                raise TransientPipelineError(f"Cloudflare temporary error HTTP {http_err.code}: {http_err.reason}")
+                logger.info(f"Successfully generated visual: {output_path} ({len(img_bytes)} bytes)")
+                return True, output_path
+
+        except urllib.error.HTTPError as e:
+            code = e.code
+            err_body = e.read().decode("utf-8", errors="replace")
+            if code in (401, 403):
+                raise PermanentPipelineError(f"Cloudflare authentication failed (HTTP {code}): {err_body}")
+            elif code in (400, 422):
+                raise PermanentPipelineError(f"Cloudflare bad request parameters (HTTP {code}): {err_body}")
             else:
-                raise PermanentPipelineError(f"Cloudflare client error HTTP {http_err.code}: {http_err.reason}")
-        except Exception as e:
-            if isinstance(e, (PermanentPipelineError, TransientPipelineError)):
-                raise e
-            raise TransientPipelineError(f"Network error communicating with Cloudflare AI: {str(e)}")
+                raise TransientPipelineError(f"Cloudflare temporary error (HTTP {code}): {err_body}")
+        except urllib.error.URLError as e:
+            raise TransientPipelineError(f"Cloudflare network connection error: {e.reason}")
+        except json.JSONDecodeError as e:
+            raise TransientPipelineError(f"Failed to parse Cloudflare JSON response: {e}")
+
+# Compatibility alias
+CloudflareImageTool = CloudflareFluxProvider
