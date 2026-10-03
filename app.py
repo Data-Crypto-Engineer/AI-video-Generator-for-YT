@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import streamlit as st
+from typing import Optional
 from utils.filesystem import WorkspaceManager
 from crew.flow import VideoProductionFlow
 from tools.ffmpeg_tool import FFmpegTool
@@ -215,6 +216,8 @@ if start_production:
             st.rerun()
 
 # Display Production Results
+if "flow_state" not in st.session_state:
+    st.session_state.flow_state = None
 state: Optional[FlowState] = st.session_state.flow_state
 
 if state:
