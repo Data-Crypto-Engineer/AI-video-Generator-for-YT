@@ -218,7 +218,7 @@ if start_production:
 # Display Production Results
 if "flow_state" not in st.session_state:
     st.session_state.flow_state = None
-state: Optional[FlowState] = st.session_state.flow_state
+state = st.session_state.get("flow_state")
 
 if state:
     if state.is_completed and state.video_path and os.path.exists(state.video_path):
