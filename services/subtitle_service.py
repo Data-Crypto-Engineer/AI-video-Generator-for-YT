@@ -27,15 +27,15 @@ class SubtitleService:
         for scene in scenes:
             duration = scene.audio_duration or scene.duration or 6.0
             narration = scene.narration.strip()
+            scene_start = getattr(scene, "start_time", current_time)
 
             # Split narration into concise readable subtitle chunks (approx 6-10 words per line)
             words = narration.split()
             if not words:
-                current_time += duration
+                current_time = scene_start + duration
                 continue
 
             # Determine chunk size based on duration and word count
-            words_per_sec = max(1.5, len(words) / max(1.0, duration))
             chunk_word_count = 7
             chunks = []
             for i in range(0, len(words), chunk_word_count):
@@ -44,8 +44,8 @@ class SubtitleService:
             chunk_duration = duration / len(chunks)
 
             for i, chunk in enumerate(chunks):
-                start = current_time + (i * chunk_duration)
-                end = min(current_time + duration, start + chunk_duration)
+                start = scene_start + (i * chunk_duration)
+                end = min(scene_start + duration, start + chunk_duration)
                 
                 srt_lines.append(f"{entry_idx}")
                 srt_lines.append(f"{format_timestamp(start)} --> {format_timestamp(end)}")
@@ -53,7 +53,7 @@ class SubtitleService:
                 srt_lines.append("")
                 entry_idx += 1
 
-            current_time += duration
+            current_time = scene_start + duration
 
         srt_content = "\n".join(srt_lines)
         with open(output_path, "w", encoding="utf-8") as f:
