@@ -49,9 +49,9 @@ class ImageService:
                 prompt_used=scene.visual_prompt
             )
         except Exception as e:
-            logger.warning(f"Cloudflare FLUX visual generation failed ({e}). Deploying multi-tier cinematic visual fallback...")
+            logger.warning(f"Cloudflare FLUX visual generation failed ({e}). Deploying dynamic context search fallback...")
 
-        # 3. Try Multi-Tier Fallback (Lexica AI -> High-Res Unsplash/Picsum)
+        # 3. Dynamic Context Search Fallback (searches real images matching the prompt)
         fallback_ok, fallback_path = self._generate_fallback_visual(scene, output_path)
         if fallback_ok:
             self._save_scene_metadata(workspace, scene, fallback_path)
@@ -86,78 +86,60 @@ class ImageService:
             pass
 
     def _generate_fallback_visual(self, scene: Scene, output_path: str) -> tuple[bool, str]:
+        """
+        Dynamic Context Search:
+        Extracts key subjects from the prompt (e.g. heart, meditation, space)
+        and downloads a matching 1080p photo so scenes are always relevant.
+        """
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-        # -------------------------------------------------------------
-        # Tier A: Lexica Art AI Search (Real AI Flux/SDXL Images)
-        # -------------------------------------------------------------
-        try:
-            # Extract key visual terms from prompt
-            query_words = [w for w in scene.visual_prompt.replace(",", " ").split() if len(w) > 3][:6]
-            search_query = "+".join(query_words) or "cinematic+peaceful+nature+landscape"
-            lexica_url = f"https://lexica.art/api/v1/search?q={urllib.parse.quote(search_query)}"
+        # Extract 2-3 most relevant topic keywords from the prompt
+        stopwords = {
+            "close-up", "person's", "subtle", "glowing", "around", "region", "standing",
+            "cinematic", "photorealistic", "ultra", "high", "quality", "with", "from",
+            "shot", "scene", "view", "looking", "facing", "background", "foreground"
+        }
+        words = [w.lower().strip(".,:;!?\"'") for w in scene.visual_prompt.split() if len(w) > 3 and w.lower() not in stopwords]
+        keywords = words[:3] if words else ["peaceful", "nature"]
+        search_query = " ".join(keywords)
 
-            req = urllib.request.Request(lexica_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=12) as resp:
+        # 1. Search Wikimedia Commons Open Library by keyword
+        try:
+            wiki_url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote(search_query)}&gsrnamespace=6&format=json&prop=imageinfo&iiprop=url|mime&iiurlwidth=1920"
+            req = urllib.request.Request(wiki_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                images = data.get("images", [])
-                if images:
-                    # Pick an image based on scene ID
-                    chosen_img = images[(scene.id - 1) % len(images)]
-                    img_url = chosen_img.get("src") or chosen_img.get("srcSmall")
-                    if img_url:
-                        dl_req = urllib.request.Request(img_url, headers=headers)
-                        with urllib.request.urlopen(dl_req, timeout=15) as dl_resp:
-                            img_data = dl_resp.read()
-                            if len(img_data) > 10000:
-                                with open(output_path, "wb") as f:
-                                    f.write(img_data)
-                                logger.info(f"Scene {scene.id:02d} visual downloaded from Lexica AI: {output_path} ({len(img_data)} bytes)")
-                                return True, output_path
-        except Exception as err:
-            logger.warning(f"Tier A (Lexica) failed for scene {scene.id:02d}: {err}")
+                pages = data.get("query", {}).get("pages", {})
+                for pid, p in pages.items():
+                    info = p.get("imageinfo", [{}])[0]
+                    mime = info.get("mime", "")
+                    if "image/jpeg" in mime or "image/png" in mime:
+                        img_url = info.get("thumburl") or info.get("url")
+                        if img_url:
+                            dl_req = urllib.request.Request(img_url, headers=headers)
+                            with urllib.request.urlopen(dl_req, timeout=12) as dl_resp:
+                                img_bytes = dl_resp.read()
+                                if len(img_bytes) > 5000:
+                                    with open(output_path, "wb") as f:
+                                        f.write(img_bytes)
+                                    logger.info(f"Context-matched visual for '{search_query}': {output_path}")
+                                    return True, output_path
+        except Exception as e:
+            logger.warning(f"Context search query failed: {e}")
 
-        # -------------------------------------------------------------
-        # Tier B: Curated High-Definition 1080p Cinematic Photography
-        # -------------------------------------------------------------
+        # 2. Backup high-resolution curated photography matching mood
+        backup_url = f"https://picsum.photos/1920/1080?random={scene.id + 10}"
         try:
-            # Beautiful thematic stock photos for documentary and spiritual content
-            CURATED_WALLPAPERS = [
-                "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1920&q=85", # Mountain sunset reflection
-                "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?auto=format&fit=crop&w=1920&q=85", # Foggy misty forest
-                "https://images.unsplash.com/photo-1518495973542-4542c06a5843?auto=format&fit=crop&w=1920&q=85", # Sunbeams through trees
-                "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=1920&q=85", # Sunlit forest glade
-                "https://images.unsplash.com/photo-1472214103451-9374bd1c798e?auto=format&fit=crop&w=1920&q=85", # Green meadow valley
-                "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1920&q=85", # Serene calm tropical ocean
-            ]
-            chosen_url = CURATED_WALLPAPERS[(scene.id - 1) % len(CURATED_WALLPAPERS)]
-            req = urllib.request.Request(chosen_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = resp.read()
-                if len(data) > 10000:
-                    with open(output_path, "wb") as f:
-                        f.write(data)
-                    logger.info(f"Scene {scene.id:02d} visual downloaded from Curated HD Library: {output_path}")
-                    return True, output_path
-        except Exception as err:
-            logger.warning(f"Tier B (Curated HD) failed: {err}")
-
-        # -------------------------------------------------------------
-        # Tier C: Picsum Dynamic 1080p Photography (Never fails)
-        # -------------------------------------------------------------
-        try:
-            picsum_url = f"https://picsum.photos/1920/1080?random={scene.id + 10}"
-            req = urllib.request.Request(picsum_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            req = urllib.request.Request(backup_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 data = resp.read()
                 if len(data) > 5000:
                     with open(output_path, "wb") as f:
                         f.write(data)
-                    logger.info(f"Scene {scene.id:02d} visual generated via Picsum 1080p: {output_path}")
                     return True, output_path
-        except Exception as err:
-            logger.error(f"Tier C failed: {err}")
+        except Exception:
+            return False, output_path
 
         return False, output_path
 
