@@ -7,6 +7,73 @@ from crew.flow import VideoProductionFlow
 from tools.ffmpeg_tool import FFmpegTool
 from utils.gemini_client import GeminiReasoningClient
 
+from datetime import datetime, timezone
+
+def render_ai_quota_status_card():
+    """Calculates hours until midnight UTC and displays status badges."""
+    now_utc = datetime.now(timezone.utc)
+    # Calculate midnight UTC tomorrow
+    midnight_utc = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
+    from datetime import timedelta
+    next_reset = midnight_utc + timedelta(days=1)
+    diff = next_reset - now_utc
+    hours_left = diff.seconds // 3600
+    mins_left = (diff.seconds % 3600) // 60
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⚡ AI Quota & Engine Status")
+
+    # Cloudflare Quota info
+    st.sidebar.markdown(f"""
+    **Cloudflare Free Tier:** 10,000 Neurons/day  
+    ⏳ **Reset countdown:** in **{hours_left}h {mins_left}m** *(00:00 UTC)*
+    """)
+
+    # Model selector to save neurons
+    image_model_choice = st.sidebar.selectbox(
+        "Visual AI Model",
+        [
+            "FLUX.1 Schnell (Highest Quality, ~8k neurons/img)",
+            "SDXL-Lightning (Fast, ~600 neurons/img — 15+ imgs/day)"
+        ],
+        index=0,
+        help="Switch to SDXL-Lightning if you want to generate more videos without running out of free neurons."
+    )
+
+    st.sidebar.caption("🛡️ **Active Fallback:** When quotas are full, Dynamic Context Search automatically finds topic-matching HD imagery so production never fails.")
+
+# 1. Quota Alert Banner at the top of results
+if any(getattr(s, "quota_exhausted", False) for s in (st.session_state.flow_state.plan.scenes if "flow_state" in st.session_state and st.session_state.flow_state and st.session_state.flow_state.plan else [])):
+    now_utc = datetime.now(timezone.utc)
+    hours_left = (86400 - (now_utc.hour * 3600 + now_utc.minute * 60 + now_utc.second)) // 3600
+    st.warning(
+        f"⚠️ **Cloudflare 10,000 Daily Neurons Limit Reached:** Visuals for this video were sourced via "
+        f"**Dynamic Context Search** to match your script. Cloudflare free neurons will automatically refresh in approx **{hours_left} hours** *(at 00:00 UTC)*."
+    )
+
+# 2. Add Badges under each Scene in the Scene Breakdown
+# (Inside your scene display loop in app.py):
+for idx, scene in enumerate(scenes):
+    col_img, col_txt = st.columns([1, 2])
+    with col_img:
+        if scene.visual_path and os.path.exists(scene.visual_path):
+            st.image(scene.visual_path, width="stretch")
+        
+        # Display which engine created this visual
+        v_source = getattr(scene, "visual_source", "Cloudflare FLUX")
+        st.caption(f"🎨 **Visual:** `{v_source}`")
+        
+        # Display audio source
+        a_source = "Gemini TTS (Kore)" if "gemini" in str(getattr(scene, "audio_path", "")).lower() else "Studio Narration"
+        st.caption(f"🎙️ **Audio:** `{a_source}`")
+
+    with col_txt:
+        st.markdown(f"**Scene {scene.id}** ({scene.duration:.1f}s)")
+        st.write(scene.narration)
+        st.caption(f"**Visual Prompt:** {scene.visual_prompt}")
+
+
+
 # Streamlit Page Setup
 st.set_page_config(
     page_title="AI Video Production Agent",
