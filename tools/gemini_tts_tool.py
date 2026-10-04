@@ -51,7 +51,6 @@ class GeminiTTSProvider(TTSProvider):
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         prompt_text = text.strip()
-        speech_style = style_direction or "Warm, calm, mature documentary narration. Natural conversational delivery."
 
         # Attempt Gemini TTS with multiple models and exponential backoff
         for model in self.MODELS:
@@ -93,7 +92,6 @@ class GeminiTTSProvider(TTSProvider):
 
                         candidates = resp_json.get("candidates", [])
                         if not candidates:
-                            logger.warning(f"Gemini {model} returned no candidates; retrying...")
                             time.sleep(1.5 * attempt)
                             continue
 
@@ -105,13 +103,11 @@ class GeminiTTSProvider(TTSProvider):
                                 break
 
                         if not audio_b64:
-                            logger.warning(f"No inlineData audio in {model} candidate; retrying...")
                             time.sleep(1.5 * attempt)
                             continue
 
                         audio_bytes = base64.b64decode(audio_b64)
                         if len(audio_bytes) < 200:
-                            logger.warning(f"Suspiciously small audio bytes ({len(audio_bytes)}); retrying...")
                             time.sleep(1.5 * attempt)
                             continue
 
@@ -120,7 +116,6 @@ class GeminiTTSProvider(TTSProvider):
 
                         valid, msg = validate_wav_audio(output_path)
                         if not valid:
-                            logger.warning(f"WAV validation failed ({msg}); retrying...")
                             time.sleep(1.5 * attempt)
                             continue
 
@@ -133,10 +128,10 @@ class GeminiTTSProvider(TTSProvider):
                     err_msg = e.read().decode("utf-8", errors="replace")[:160]
                     logger.warning(f"Gemini TTS ({model}) attempt {attempt}/3 HTTP {code}: {err_msg}")
                     if code in (429, 500, 502, 503, 504):
-                        time.sleep(2.5 * attempt)  # Backoff to allow RPM rate limit to recover
+                        time.sleep(2.5 * attempt)
                         continue
                     else:
-                        break  # Try next model on client errors
+                        break
 
                 except Exception as e:
                     logger.warning(f"Gemini TTS ({model}) attempt {attempt}/3 error: {e}")
@@ -154,7 +149,6 @@ class GeminiTTSProvider(TTSProvider):
         """
         temp_mp3 = output_path + ".temp.mp3"
         try:
-            # Clean text for query URL
             clean_text = text.replace("\n", " ").strip()
             if len(clean_text) > 200:
                 clean_text = clean_text[:197] + "..."
@@ -186,7 +180,6 @@ class GeminiTTSProvider(TTSProvider):
 
         except Exception as e:
             logger.error(f"Fallback speech synthesis failed: {e}. Generating silent placeholder WAV...")
-            # Absolute last resort: silent WAV matching reading speed (15 chars/sec)
             dur = max(4.0, round(len(text) / 14.0, 2))
             silent_cmd = [
                 "ffmpeg",
