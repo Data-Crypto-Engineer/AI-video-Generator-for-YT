@@ -34,6 +34,7 @@ class VoiceService:
                 logger.info(f"Reusing cached narration for scene {scene.id:02d}: {output_path} ({dur:.2f}s)")
                 scene.audio_path = output_path
                 scene.audio_duration = dur
+                scene.duration = dur  # Authoritative timeline update
                 return SceneAudioResult(
                     scene_id=scene.id,
                     status="completed",
@@ -53,6 +54,7 @@ class VoiceService:
             )
             scene.audio_path = path
             scene.audio_duration = duration
+            scene.duration = duration  # Authoritative timeline update
             return SceneAudioResult(
                 scene_id=scene.id,
                 status="completed",
@@ -61,6 +63,7 @@ class VoiceService:
             )
         except Exception as e:
             logger.error(f"TTS generation failed for scene {scene.id:02d}: {e}")
+            scene.error = str(e)
             return SceneAudioResult(
                 scene_id=scene.id,
                 status="failed",
@@ -139,15 +142,17 @@ class MusicSFXService:
                 loop=True
             )
         else:
-            logger.warning(f"Music track not found at {music_file_path}; creating fallback recommendation.")
+            logger.warning(f"Music track not found at {music_file_path}; setting status to 'skipped' and creating recommendation.")
             music_plan = MusicTrackPlan(
-                status="not_found",
+                status="skipped",
                 file=None
             )
             fallback = MusicFallbackRecommendation(
-                suggested_theme=f"Slow atmospheric cinematic ambient for '{music_mood}'",
-                suggested_style="Soft instrumental ambient drone, acoustic low piano, gentle strings, no vocals.",
-                reason="No matching verified audio file in local library.",
+                suggested_theme=f"Soft atmospheric ambient piano for '{music_mood}'",
+                suggested_style="Minimal ambient cinematic drone, soft acoustic piano, subtle synth pad, no vocals.",
+                tempo="slow",
+                instrumentation="soft piano + subtle pad",
+                reason="No matching verified audio file in local library; continuing without background music to avoid copyright infringement.",
                 suggestion_links=[
                     "https://studio.youtube.com/channel/music (YouTube Audio Library - Free & Monetization Safe)",
                     "https://freemusicarchive.org (Free Music Archive CC-BY)",
@@ -157,9 +162,9 @@ class MusicSFXService:
 
         # 2. Match SFX cues across scene timeline
         sfx_cues: List[SFXCue] = []
-        current_time = 0.0
         for scene in scenes:
             dur = scene.audio_duration or scene.duration or 6.0
+            start_t = getattr(scene, "start_time", 0.0)
             if scene.sfx:
                 for sfx_name in scene.sfx:
                     norm_sfx = sfx_name.lower().strip()
@@ -171,10 +176,9 @@ class MusicSFXService:
                                 scene_id=scene.id,
                                 name=norm_sfx,
                                 file=sfx_path,
-                                start_time=round(current_time + 0.5, 2),
-                                volume=0.18
+                                start_time=round(start_t + 0.3, 2),
+                                volume=0.22
                             ))
-            current_time += dur
 
         return AudioPlan(
             music=music_plan,
