@@ -2,7 +2,6 @@ import os
 import json
 import uuid
 import streamlit as st
-from typing import Optional
 from utils.filesystem import WorkspaceManager
 from crew.flow import VideoProductionFlow
 from tools.ffmpeg_tool import FFmpegTool
@@ -112,18 +111,19 @@ with st.sidebar:
     if yt_conf:
         st.info("✓ YouTube V2 OAuth Configured")
     else:
-        st.caption("ℹ️ YouTube V2: Dry-run / Sandbox Mode")
+        st.caption("ℹ️ YouTube V2: OAuth credentials not set (V1 MP4 production operates fully without credentials)")
 
     st.markdown("---")
     st.markdown("### 🤖 8 Production Agents")
     st.caption("1. **Director**: Screenplay & Scene Decomposition\n2. **Visual**: Cloudflare FLUX-1-Schnell\n3. **Voice**: Google Gemini 3.8 Flash-Lite TTS\n4. **Music/SFX**: Licensed Library & Ducking\n5. **Editor**: Deterministic FFmpeg Assembly\n6. **QA**: Forensic stream QC & ffprobe\n7. **Thumbnail**: High-CTR Art & Packaging\n8. **YouTube**: V2 OAuth2 Distribution")
 
 # Main Header
-st.markdown('<div class="main-header">AI VIDEO PRODUCTION AGENT</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Transform any raw script into a broadcast-ready narrated documentary with FLUX visuals, Gemini TTS, and FFmpeg assembly.</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">AI VIDEO PRODUCTION STUDIO</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Autonomous multi-agent video studio: transforms raw text into broadcast-grade narrated documentaries with Ken Burns motion, ducked music, and subtitles.</div>', unsafe_allow_html=True)
 
 # Sample Scripts
 SAMPLE_SCRIPTS = {
+    "The Soul Sanctuary (Peace & Contemplation)": "The heart can become heavy not from weakness, but from carrying what was meant to be surrendered. In quiet moments of contemplation, return to the breath and find peace. True healing begins when we soften our grip and trust the path before us.",
     "Deep Sea Bioluminescence": "Miles beneath the ocean surface lies an alien world where sunlight has never touched. In this perpetual abyss, creatures illuminate the dark with living fire—chemical lights called bioluminescence. Some flash to attract prey, others to blind predators in the ink-black depths. Life here thrives under pressures that would crush steel submarines.",
     "The Origin of Black Holes": "When a star twenty times more massive than our sun runs out of nuclear fuel, its core collapses under gravity in a fraction of a second. The resulting supernova tears the outer layers apart, leaving behind a gravitational singularity so dense that not even light can escape its event horizon. Here, physics as we understand it simply breaks down.",
     "Ancient Lost Cities": "Deep within the dense Amazon rainforest, modern LiDAR scans have pierced through centuries of dense canopy to reveal vast networks of forgotten civilization. Pyramids, canals, and ancient causeways tell the story of millions who lived here thousands of years before Columbus. History is being rewritten one laser pulse at a time."
@@ -156,12 +156,12 @@ with col1:
     style_option = st.selectbox(
         "Video style:",
         [
+            "The Soul Sanctuary (Peaceful & Spiritual)",
             "Cinematic Documentary",
+            "Warm Nature & Landscapes",
             "Deep Space Odyssey",
             "Historical Mystery",
-            "Nature & Wildlife",
-            "Cyberpunk Sci-Fi",
-            "Tech Explainer"
+            "Minimalist Ambient"
         ]
     )
 
@@ -216,14 +216,23 @@ if start_production:
             st.rerun()
 
 # Display Production Results
-if "flow_state" not in st.session_state:
-    st.session_state.flow_state = None
-state = st.session_state.get("flow_state")
+state: Optional[FlowState] = st.session_state.flow_state
 
 if state:
     if state.is_completed and state.video_path and os.path.exists(state.video_path):
         st.markdown("---")
-        st.success("🎉 **VIDEO READY** — Production Completed Successfully!")
+        st.success("🎉 **VIDEO PRODUCTION READY** — Broadcast Assets Built Successfully!")
+
+        # Script Normalization & Editorial Review
+        if state.normalized_script:
+            with st.expander("📝 Script Normalization & Verification", expanded=False):
+                st.markdown("**Original Input:**")
+                st.caption(state.original_script)
+                st.markdown("**Normalized Production Script:**")
+                st.write(state.normalized_script)
+                if state.warnings:
+                    for w in state.warnings:
+                        st.warning(f"⚠️ {w}")
 
         col_vid, col_meta = st.columns([3, 2])
 
@@ -275,6 +284,37 @@ if state:
                 st.text_area("Description:", value=state.packaging.metadata.description, height=120, disabled=True)
                 st.caption(f"**Tags:** {', '.join(state.packaging.metadata.tags[:8])}")
 
+        # Authoritative Timeline & Scene Breakdown
+        if state.plan and state.plan.scenes:
+            with st.expander(f"⏱️ Authoritative Timeline & Scene Plan ({len(state.plan.scenes)} Scenes, {state.plan.total_duration:.1f}s)", expanded=False):
+                timeline_rows = []
+                for s in state.plan.scenes:
+                    dur = s.audio_duration or s.duration
+                    timeline_rows.append({
+                        "Scene": s.id,
+                        "Start": f"{s.start_time:.2f}s",
+                        "End": f"{s.end_time:.2f}s",
+                        "Duration": f"{dur:.2f}s",
+                        "Motion": s.camera_motion.value if hasattr(s.camera_motion, "value") else str(s.camera_motion),
+                        "Transition": s.transition.value if hasattr(s.transition, "value") else str(s.transition),
+                        "Status": s.status.value if hasattr(s.status, "value") else str(s.status)
+                    })
+                st.table(timeline_rows)
+
+                for s in state.plan.scenes:
+                    sc1, sc2, sc3 = st.columns([1, 2, 1])
+                    with sc1:
+                        if s.visual_path and os.path.exists(s.visual_path):
+                            st.image(s.visual_path, caption=f"Scene {s.id}")
+                    with sc2:
+                        st.markdown(f"**Scene {s.id}** ({s.start_time:.1f}s - {s.end_time:.1f}s)")
+                        st.write(f"_{s.narration}_")
+                        st.caption(f"**Visual Prompt:** {s.visual_prompt[:120]}...")
+                    with sc3:
+                        if s.audio_path and os.path.exists(s.audio_path):
+                            with open(s.audio_path, "rb") as af:
+                                st.audio(af.read(), format="audio/wav")
+
         # QA Report Accordion
         if state.qa_result:
             with st.expander("🔍 QA Forensic Audit Report", expanded=False):
@@ -284,27 +324,10 @@ if state:
                     icon = "✅" if check.passed else ("❌" if check.is_fatal else "⚠️")
                     st.write(f"{icon} **[{check.category.upper()}] {check.check_name}**: {check.details}")
 
-        # Scene Breakdown Accordion
-        if state.plan and state.plan.scenes:
-            with st.expander(f"🎞️ Scene-by-Scene Breakdown ({len(state.plan.scenes)} Scenes)", expanded=False):
-                for s in state.plan.scenes:
-                    sc1, sc2, sc3 = st.columns([1, 2, 1])
-                    with sc1:
-                        if s.visual_path and os.path.exists(s.visual_path):
-                            st.image(s.visual_path, caption=f"Scene {s.id}")
-                    with sc2:
-                        st.markdown(f"**Scene {s.id}** ({s.audio_duration or s.duration:.1f}s)")
-                        st.write(f"_{s.narration}_")
-                        st.caption(f"**Motion:** {s.camera_motion.value if hasattr(s.camera_motion, 'value') else s.camera_motion} | **Transition:** {s.transition.value if hasattr(s.transition, 'value') else s.transition}")
-                    with sc3:
-                        if s.audio_path and os.path.exists(s.audio_path):
-                            with open(s.audio_path, "rb") as af:
-                                st.audio(af.read(), format="audio/wav")
-
         # VERSION 2: YouTube Publisher
         st.markdown("---")
         st.markdown("### 🚀 Version 2: YouTube Distribution")
-        st.caption("Publish the finalized MP4, custom thumbnail, and SEO metadata directly to your YouTube channel.")
+        st.caption("Publish the finalized MP4, custom thumbnail, and SEO metadata directly to your YouTube channel using official OAuth 2.0.")
 
         c_priv, c_pub = st.columns([2, 3])
         with c_priv:
@@ -318,7 +341,7 @@ if state:
             publish_btn = st.button("📤 UPLOAD TO YOUTUBE", use_container_width=True)
 
         if publish_btn:
-            with st.spinner("Publishing video and thumbnail to YouTube..."):
+            with st.spinner("Contacting YouTube Data API v3..."):
                 flow = VideoProductionFlow(state.project_id)
                 yt_res = flow.run_v2_publish(privacy_status=privacy_val)
                 st.session_state.v2_result = yt_res
@@ -329,6 +352,8 @@ if state:
                 st.success(f"✅ {res.get('message')}")
                 st.markdown(f"**YouTube URL:** [{res.get('url')}]({res.get('url')})")
                 st.caption(f"Video ID: `{res.get('video_id')}` | Privacy: `{res.get('privacy_status')}`")
+            elif res.get("status") == "not_authenticated":
+                st.warning(f"⚠️ **Authentication Required:** {res.get('message')}")
             else:
                 st.error(f"Upload failed: {res.get('message')}")
 
