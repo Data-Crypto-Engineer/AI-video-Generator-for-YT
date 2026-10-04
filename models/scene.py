@@ -22,7 +22,8 @@ class VisualType(str, Enum):
 
 class SceneStatus(str, Enum):
     PENDING = "pending"
-    IN_PROGRESS = "in_progress"
+    PROCESSING = "processing"
+    IN_PROGRESS = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -38,6 +39,8 @@ class Scene(BaseModel):
     sfx: List[str] = Field(default_factory=list, description="Cued sound effect names (e.g. whoosh, wind)")
     tone: str = Field(default="calm", description="Voice tone direction")
     emotion: str = Field(default="wonder", description="Emotional delivery")
+    start_time: float = Field(default=0.0, description="Timeline start timestamp in seconds")
+    end_time: float = Field(default=0.0, description="Timeline end timestamp in seconds")
     
     # Generated artifacts
     visual_path: Optional[str] = Field(default=None, description="Path to generated visual file")
