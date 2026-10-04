@@ -41,15 +41,16 @@ class YouTubeUploadTool:
 
         # Check configuration
         if not self.is_configured():
-            logger.warning("YouTube OAuth credentials not provided in secrets; executing dry-run simulation.")
-            mock_video_id = f"yt_sim_{os.path.basename(video_path).split('.')[0]}"
+            logger.warning("YouTube OAuth credentials not configured; upload aborted.")
             return {
-                "success": True,
-                "video_id": mock_video_id,
-                "url": f"https://www.youtube.com/watch?v={mock_video_id}",
+                "success": False,
+                "status": "not_authenticated",
+                "video_id": None,
+                "url": None,
+                "thumbnail_uploaded": False,
                 "privacy_status": privacy_status,
-                "mode": "simulation",
-                "message": "Upload simulated successfully. Provide YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, and YOUTUBE_REFRESH_TOKEN for live channel publish."
+                "mode": "live",
+                "message": "YouTube OAuth credentials not configured. Please supply YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, and YOUTUBE_REFRESH_TOKEN in Secrets."
             }
 
         try:
@@ -104,6 +105,9 @@ class YouTubeUploadTool:
             video_id = response.get("id")
             logger.info(f"Video uploaded successfully! Video ID: {video_id}")
 
+            thumbnail_uploaded = False
+            thumbnail_error = None
+
             # Upload thumbnail if available
             if thumbnail_path and os.path.exists(thumbnail_path) and video_id:
                 try:
@@ -113,17 +117,22 @@ class YouTubeUploadTool:
                         videoId=video_id,
                         media_body=thumb_media
                     ).execute()
+                    thumbnail_uploaded = True
                     logger.info("Custom thumbnail uploaded successfully.")
                 except Exception as te:
+                    thumbnail_error = str(te)
                     logger.warning(f"Thumbnail upload failed (video still published): {te}")
 
             return {
                 "success": True,
+                "status": "published",
                 "video_id": video_id,
                 "url": f"https://www.youtube.com/watch?v={video_id}",
+                "thumbnail_uploaded": thumbnail_uploaded,
+                "thumbnail_error": thumbnail_error,
                 "privacy_status": privacy_status,
                 "mode": "live",
-                "message": "Video and metadata published to your YouTube channel successfully."
+                "message": "Video published to your YouTube channel successfully." if not thumbnail_error else f"Video published (video_id: {video_id}), but thumbnail upload had warning: {thumbnail_error}"
             }
 
         except Exception as e:
