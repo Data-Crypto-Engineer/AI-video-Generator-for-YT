@@ -145,8 +145,7 @@ class FFmpegTool:
         output_path: str
     ) -> Tuple[bool, str]:
         """
-        Concatenates clips. On low-memory cloud containers, concat demuxer is used
-        by default for stability, speed, and zero memory overhead.
+        Concatenates clips with zero memory overhead.
         """
         if not clip_paths:
             return False, "No clips provided"
@@ -170,10 +169,8 @@ class FFmpegTool:
         duck_vol: float = 0.04
     ) -> bool:
         """
-        Broadcast-grade audio mixing engine:
-        1. Narration stream as primary authoritative lead (volume=1.0)
-        2. Background music using zero-memory native -stream_loop
-        3. Dynamic sidechain ducking under narration
+        Multi-stream audio mix:
+        Narration + 0-RAM looped background music with sidechain ducking + SFX cues.
         """
         has_music = bool(music_path and os.path.exists(music_path))
         valid_sfx = [c for c in (sfx_cues or []) if hasattr(c, "file") and os.path.exists(c.file)]
@@ -197,10 +194,10 @@ class FFmpegTool:
         filter_parts = []
         mix_inputs = ["[narr_lead]"]
 
-        # 1. Narration stream setup (split into lead and sidechain trigger)
+        # Narration stream setup (split into lead and sidechain trigger)
         filter_parts.append("[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asplit=2[narr_lead][narr_side]")
 
-        # 2. Music stream with native stream looping (0 RAM allocation)
+        # Music stream with stream looping (0 RAM overhead)
         next_input_idx = 1
         if has_music:
             input_args.extend(["-stream_loop", "-1", "-i", music_path])
@@ -214,7 +211,7 @@ class FFmpegTool:
             mix_inputs.append("[ducked_bgm]")
             next_input_idx += 1
 
-        # 3. SFX cues
+        # SFX cues
         for idx, cue in enumerate(valid_sfx):
             input_args.extend(["-i", cue.file])
             delay_ms = max(0, int(cue.start_time * 1000))
@@ -226,7 +223,6 @@ class FFmpegTool:
             mix_inputs.append(f"[sfx_{idx}]")
             next_input_idx += 1
 
-        # 4. Final mix
         mix_str = "".join(mix_inputs)
         filter_parts.append(f"{mix_str}amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=0[aout]")
         filter_complex = ";".join(filter_parts)
@@ -293,7 +289,7 @@ class FFmpegTool:
         duration: Optional[float] = None
     ) -> bool:
         """
-        Burns subtitles with aspect-ratio-aware safe zones:
+        Burns subtitles with safe zones:
         - 16:9: MarginV=35
         - 9:16: MarginV=160
         """
