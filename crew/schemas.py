@@ -14,7 +14,10 @@ class FlowState(BaseModel):
     resolution: str = "1080p"
     stage: str = "init"
     plan: Optional[ProductionPlan] = None
+    edit_plan: Optional[Any] = None
     audio_plan: Optional[AudioPlan] = None
+    original_script: str = ""
+    normalized_script: str = ""
     packaging: Optional[VideoPackaging] = None
     qa_result: Optional[QAResult] = None
     video_path: Optional[str] = None
