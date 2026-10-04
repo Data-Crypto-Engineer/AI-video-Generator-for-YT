@@ -34,6 +34,8 @@ class SFXCue(BaseModel):
 class MusicFallbackRecommendation(BaseModel):
     suggested_theme: str
     suggested_style: str
+    tempo: str = "slow"
+    instrumentation: str = "soft piano + subtle pad"
     reason: str
     suggestion_links: List[str] = Field(default_factory=list)
 
