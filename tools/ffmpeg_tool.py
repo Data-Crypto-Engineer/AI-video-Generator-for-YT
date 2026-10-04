@@ -36,66 +36,65 @@ class FFmpegTool:
         fps: int = 30
     ) -> bool:
         """
-        Renders a single scene clip with memory-bounded Ken Burns motion.
-        Uses 1.15x buffer (not 2x/4K) to stay well within Streamlit's 1GB RAM container.
+        Renders a single scene clip with constant framerate and audio sync.
+        Guarantees 30.00 fps across all motion types to ensure seamless concatenation.
         """
         total_frames = int(duration * fps) + 5
 
         # Memory optimization: 1.15x canvas instead of 2.0x (reduces RAM usage by 70%)
         buffer_w = int(width * 1.15)
         buffer_h = int(height * 1.15)
-        # Ensure dimensions are even numbers for x264
         buffer_w -= buffer_w % 2
         buffer_h -= buffer_h % 2
 
         scale_crop = f"scale=w={buffer_w}:h={buffer_h}:force_original_aspect_ratio=increase,crop={buffer_w}:{buffer_h}"
 
         if motion == "static":
-            # Zero-memory static image scale: bypasses zoompan completely
-            video_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},format=yuv420p"
+            # Explicit fps={fps} ensures static clips match zoom clips exactly
+            video_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps={fps},format=yuv420p"
         elif motion == "slow_zoom_out":
             video_filter = (
                 f"{scale_crop},"
                 f"zoompan=z='if(lte(zoom,1.0),1.12,max(1.001,1.12-0.12*on/{total_frames}))':"
                 f"x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps},"
-                f"format=yuv420p"
+                f"fps={fps},format=yuv420p"
             )
         elif motion == "pan_left":
             video_filter = (
                 f"{scale_crop},"
                 f"zoompan=z=1.10:x='(iw-iw/zoom)*(1-on/{total_frames})':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps},"
-                f"format=yuv420p"
+                f"fps={fps},format=yuv420p"
             )
         elif motion == "pan_right":
             video_filter = (
                 f"{scale_crop},"
                 f"zoompan=z=1.10:x='(iw-iw/zoom)*(on/{total_frames})':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps},"
-                f"format=yuv420p"
+                f"fps={fps},format=yuv420p"
             )
         else:  # slow_zoom_in default
             video_filter = (
                 f"{scale_crop},"
                 f"zoompan=z='min(1.12,1.0+0.12*on/{total_frames})':"
                 f"x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps},"
-                f"format=yuv420p"
+                f"fps={fps},format=yuv420p"
             )
 
         cmd = [
             self.ffmpeg,
             "-loop", "1",
-            "-t", f"{duration:.3f}",
             "-i", image_path,
             "-i", audio_path,
             "-vf", video_filter,
+            "-r", str(fps),          # Enforce constant output framerate
             "-c:v", "libx264",
-            "-preset", "ultrafast",   # ultrafast reduces CPU/RAM spike on Cloud containers
-            "-threads", "2",          # Restrict to 2 threads to prevent Streamlit vCPU thrashing
+            "-preset", "ultrafast",
+            "-threads", "2",
             "-crf", "22",
             "-c:a", "aac",
             "-b:a", "192k",
             "-ar", "48000",
             "-ac", "2",
-            "-shortest",
+            "-t", f"{duration:.3f}", # Exact duration boundary
             "-y",
             output_clip_path
         ]
@@ -108,7 +107,7 @@ class FFmpegTool:
         return True
 
     def concatenate_scene_clips(self, clip_paths: List[str], output_path: str) -> bool:
-        """Concatenates rendered scene clips safely with concat demuxer (near-zero RAM)."""
+        """Concatenates rendered scene clips safely with concat demuxer."""
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             for p in clip_paths:
                 f.write(f"file '{os.path.abspath(p)}'\n")
@@ -121,6 +120,8 @@ class FFmpegTool:
                 "-safe", "0",
                 "-i", concat_file,
                 "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-fflags", "+genpts",
                 "-y",
                 output_path
             ]
@@ -145,7 +146,7 @@ class FFmpegTool:
     ) -> Tuple[bool, str]:
         """
         Concatenates clips. On low-memory cloud containers, concat demuxer is used
-        by default for stability and speed, guaranteeing zero memory overflow.
+        by default for stability, speed, and zero memory overhead.
         """
         if not clip_paths:
             return False, "No clips provided"
@@ -154,7 +155,6 @@ class FFmpegTool:
             shutil.copy2(clip_paths[0], output_path)
             return True, "cut"
 
-        # Concat demuxer copies compressed NAL units directly with 0 memory overhead
         ok = self.concatenate_scene_clips(clip_paths, output_path)
         return ok, "cut"
 
@@ -180,13 +180,13 @@ class FFmpegTool:
 
         # Case 1: Narration only
         if not has_music and not valid_sfx:
-            logger.info("No background music or SFX provided; passing audio stream through.")
             cmd = [
                 self.ffmpeg,
                 "-i", video_input,
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-b:a", "192k",
+                "-t", f"{total_duration:.3f}",
                 "-y",
                 output_path
             ]
@@ -203,7 +203,6 @@ class FFmpegTool:
         # 2. Music stream with native stream looping (0 RAM allocation)
         next_input_idx = 1
         if has_music:
-            # Use -stream_loop -1 BEFORE -i (does NOT buffer in RAM)
             input_args.extend(["-stream_loop", "-1", "-i", music_path])
             filter_parts.append(
                 f"[{next_input_idx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
@@ -241,8 +240,7 @@ class FFmpegTool:
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "192k",
-            "-t", f"{total_duration:.3f}",
-            "-shortest",
+            "-t", f"{total_duration:.3f}", # Precise duration boundary
             "-y",
             output_path
         ]
@@ -250,11 +248,12 @@ class FFmpegTool:
         logger.info(f"Executing multi-stream audio mix: music={'yes' if has_music else 'no'}, sfx_count={len(valid_sfx)}...")
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
-            logger.warning(f"Audio mix failed ({res.stderr[-200:] if res.stderr else ''}), falling back to direct copy.")
+            logger.warning(f"Audio mix failed, falling back to direct copy: {res.stderr[-200:] if res.stderr else ''}")
             fallback_cmd = [
                 self.ffmpeg,
                 "-i", video_input,
                 "-c", "copy",
+                "-t", f"{total_duration:.3f}",
                 "-y",
                 output_path
             ]
@@ -294,7 +293,7 @@ class FFmpegTool:
         duration: Optional[float] = None
     ) -> bool:
         """
-        Burns subtitles with safe zones:
+        Burns subtitles with aspect-ratio-aware safe zones:
         - 16:9: MarginV=35
         - 9:16: MarginV=160
         """
