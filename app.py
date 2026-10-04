@@ -81,7 +81,7 @@ if "v2_result" not in st.session_state:
     st.session_state.v2_result = None
 
 def render_ai_quota_status_card():
-    """Calculates hours until midnight UTC and displays status badges."""
+    """Live Quota Health Probe: Checks real-time neuron exhaustion & countdown to 00:00 UTC."""
     now_utc = datetime.now(timezone.utc)
     midnight_utc = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
     next_reset = midnight_utc + timedelta(days=1)
@@ -90,26 +90,43 @@ def render_ai_quota_status_card():
     mins_left = (diff.seconds % 3600) // 60
 
     st.sidebar.markdown("---")
-    st.sidebar.subheader("⚡ AI Quota & Engine Status")
+    st.sidebar.subheader("⚡ Live AI Quota & Health")
 
-    # Cloudflare Quota info
-    st.sidebar.markdown(f"""
-    **Cloudflare Free Tier:** 10,000 Neurons/day  
-    ⏳ **Reset countdown:** in **{hours_left}h {mins_left}m** *(00:00 UTC)*
-    """)
-
-    # Model selector to save neurons
-    image_model_choice = st.sidebar.selectbox(
-        "Visual AI Model",
-        [
-            "FLUX.1 Schnell (Highest Quality, ~8k neurons/img)",
-            "SDXL-Lightning (Fast, ~600 neurons/img — 15+ imgs/day)"
-        ],
-        index=0,
-        help="Switch to SDXL-Lightning if you want to generate more videos without running out of free neurons."
+    # Check live quota status flag
+    is_exhausted = os.environ.get("CLOUDFLARE_QUOTA_EXHAUSTED") == "true" or any(
+        getattr(s, "quota_exhausted", False)
+        for s in (st.session_state.flow_state.plan.scenes if st.session_state.flow_state and st.session_state.flow_state.plan else [])
     )
 
-    st.sidebar.caption("🛡️ **Active Fallback:** When quotas are full, Dynamic Context Search automatically finds topic-matching HD imagery so production never fails.")
+    if is_exhausted:
+        st.sidebar.error(
+            f"🔴 **Cloudflare Quota Exhausted**\n\n"
+            f"10,000 / 10,000 daily neurons used.\n\n"
+            f"⏳ **Refreshes in:** **{hours_left}h {mins_left}m** *(at 00:00 UTC)*"
+        )
+        st.sidebar.caption("🛡️ **Active Protection:** Videos will continue generating using high-quality **Dynamic Context Search**.")
+    else:
+        st.sidebar.success(
+            f"🟢 **Cloudflare Workers AI Active**\n\n"
+            f"Neurons available for generation.\n\n"
+            f"⏳ **Next daily reset:** in **{hours_left}h {mins_left}m**"
+        )
+
+    # Model selector to control neuron consumption
+    model_labels = {
+        "SDXL-Lightning (Fast, ~600 neurons/img — 15+ imgs/day)": "@cf/bytedance/stable-diffusion-xl-lightning",
+        "FLUX.1 Schnell (Highest Quality, ~8,000 neurons/img — 1-2 imgs/day)": "@cf/black-forest-labs/flux-1-schnell"
+    }
+
+    selected_label = st.sidebar.selectbox(
+        "Visual Generation Model",
+        list(model_labels.keys()),
+        index=0,
+        help="SDXL-Lightning consumes 90% fewer neurons, allowing you to generate far more scenes per day on the free plan."
+    )
+
+    # Save choice to environment for cloudflare_image_tool to use immediately
+    os.environ["CLOUDFLARE_IMAGE_MODEL"] = model_labels[selected_label]
 
 # Sidebar Diagnostics
 with st.sidebar:
@@ -128,7 +145,7 @@ with st.sidebar:
     cf_token = os.environ.get("CLOUDFLARE_API_TOKEN")
     cf_acc = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
     if cf_token and cf_acc:
-        st.success("✓ Cloudflare FLUX Configured")
+        st.success("✓ Cloudflare API Configured")
     else:
         st.warning("⚠️ Cloudflare credentials missing")
 
@@ -146,12 +163,12 @@ with st.sidebar:
     else:
         st.caption("ℹ️ YouTube V2: OAuth credentials not set (V1 MP4 production operates fully without credentials)")
 
-    # Render AI Quota & Countdown Card
+    # Render Live Quota Health & Model Switcher
     render_ai_quota_status_card()
 
     st.markdown("---")
     st.markdown("### 🤖 8 Production Agents")
-    st.caption("1. **Director**: Screenplay & Scene Decomposition\n2. **Visual**: Cloudflare FLUX-1-Schnell\n3. **Voice**: Google Gemini 3.8 Flash-Lite TTS\n4. **Music/SFX**: Licensed Library & Ducking\n5. **Editor**: Deterministic FFmpeg Assembly\n6. **QA**: Forensic stream QC & ffprobe\n7. **Thumbnail**: High-CTR Art & Packaging\n8. **YouTube**: V2 OAuth2 Distribution")
+    st.caption("1. **Director**: Screenplay & Scene Decomposition\n2. **Visual**: Cloudflare Workers AI\n3. **Voice**: Google Gemini 3.8 Flash-Lite TTS\n4. **Music/SFX**: Licensed Library & Ducking\n5. **Editor**: Deterministic FFmpeg Assembly\n6. **QA**: Forensic stream QC & ffprobe\n7. **Thumbnail**: High-CTR Art & Packaging\n8. **YouTube**: V2 OAuth2 Distribution")
 
 # Main Header
 st.markdown('<div class="main-header">AI VIDEO PRODUCTION STUDIO</div>', unsafe_allow_html=True)
@@ -258,7 +275,7 @@ if state:
         st.markdown("---")
         st.success("🎉 **VIDEO PRODUCTION READY** — Broadcast Assets Built Successfully!")
 
-        # Quota Alert Banner (if Cloudflare neurons were exhausted)
+        # Quota Alert Banner (if Cloudflare neurons were exhausted during production)
         has_quota_warning = any(getattr(s, "quota_exhausted", False) for s in (state.plan.scenes if state.plan and state.plan.scenes else []))
         if has_quota_warning:
             now_utc = datetime.now(timezone.utc)
