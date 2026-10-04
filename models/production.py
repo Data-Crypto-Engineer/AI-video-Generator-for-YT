@@ -19,7 +19,11 @@ class ProductionPlan(BaseModel):
     project: ProjectConfig
     scenes: List[Scene]
     music_mood: str = "atmospheric"
+    original_script: str = ""
+    normalized_script: str = ""
+    script_warnings: List[str] = Field(default_factory=list)
     total_estimated_duration: float = 0.0
+    total_duration: float = 0.0
 
 class EditScenePlan(BaseModel):
     scene_id: int
@@ -41,6 +45,8 @@ class EditPlan(BaseModel):
     fps: int = 30
     scenes: List[EditScenePlan]
     audio: AudioPlan
+    sfx_cues: List[Dict[str, Any]] = Field(default_factory=list)
+    music_ducking_enabled: bool = True
     subtitles_file: Optional[str] = None
     output_path: str
 
@@ -48,6 +54,8 @@ class ProductionManifest(BaseModel):
     project_id: str
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     script_hash: str
+    original_script: str = ""
+    normalized_script: str = ""
     status: str = "in_progress" # in_progress | completed | failed
     stage: str = "init"
     config: ProjectConfig
@@ -59,6 +67,7 @@ class ProductionManifest(BaseModel):
     output_video_path: Optional[str] = None
     output_thumbnail_path: Optional[str] = None
     output_subtitles_path: Optional[str] = None
+    youtube: Optional[Dict[str, Any]] = None
     errors: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     stage_durations: Dict[str, float] = Field(default_factory=dict)
