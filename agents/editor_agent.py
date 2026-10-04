@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple
 from models.scene import Scene
 from models.audio import AudioPlan
+from models.production import EditPlan
 from services.video_service import VideoAssemblyService
 from services.subtitle_service import SubtitleService
 from utils.filesystem import WorkspaceManager
@@ -22,21 +23,23 @@ class EditorAgent:
         scenes: List[Scene],
         audio_plan: AudioPlan,
         workspace: WorkspaceManager,
+        aspect_ratio: str = "16:9",
         resolution: str = "1080p",
         burn_subtitles: bool = True
-    ) -> Tuple[bool, str, str]:
-        logger.info(f"Editor Agent starting video assembly for {len(scenes)} scenes ({resolution})...")
+    ) -> Tuple[bool, str, str, Optional[EditPlan]]:
+        logger.info(f"Editor Agent starting video assembly for {len(scenes)} scenes ({resolution}, {aspect_ratio})...")
 
-        # 1. Generate SRT subtitles
+        # 1. Generate SRT subtitles based on authoritative scene timings
         subtitles_path = workspace.get_subtitles_path()
         self.subtitle_service.generate_srt(scenes, subtitles_path)
 
-        # 2. Render final MP4 via FFmpeg
-        success, video_path = self.video_service.assemble_final_video(
+        # 2. Render final MP4 via FFmpeg and obtain structured EditPlan
+        success, video_path, edit_plan = self.video_service.assemble_final_video(
             scenes=scenes,
             audio_plan=audio_plan,
             subtitles_path=subtitles_path,
             workspace=workspace,
+            aspect_ratio=aspect_ratio,
             resolution=resolution,
             burn_subtitles=burn_subtitles
         )
@@ -46,4 +49,4 @@ class EditorAgent:
         else:
             logger.error(f"Editor Agent render failed: {video_path}")
 
-        return success, video_path, subtitles_path
+        return success, video_path, subtitles_path, edit_plan
