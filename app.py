@@ -216,8 +216,7 @@ if start_production:
             st.rerun()
 
 # Display Production Results
-state: Optional[FlowState] = st.session_state.flow_state
-
+state = st.session_state.flow_state
 if state:
     if state.is_completed and state.video_path and os.path.exists(state.video_path):
         st.markdown("---")
