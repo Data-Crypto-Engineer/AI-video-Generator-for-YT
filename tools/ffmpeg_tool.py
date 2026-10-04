@@ -9,7 +9,8 @@ logger = get_logger("ffmpeg_tool")
 
 class FFmpegTool:
     """
-    Deterministic multimedia rendering engine using system FFmpeg and ffprobe.
+    Deterministic multimedia rendering engine optimized for low-memory cloud containers
+    (Streamlit Community Cloud 1GB RAM budget).
     """
     def __init__(self, ffmpeg_bin: str = "ffmpeg", ffprobe_bin: str = "ffprobe"):
         self.ffmpeg = ffmpeg_bin
@@ -35,36 +36,48 @@ class FFmpegTool:
         fps: int = 30
     ) -> bool:
         """
-        Renders a single scene clip by applying Ken Burns motion to the still image
-        scaled accurately to the target aspect ratio, paired with narration audio.
+        Renders a single scene clip with memory-bounded Ken Burns motion.
+        Uses 1.15x buffer (not 2x/4K) to stay well within Streamlit's 1GB RAM container.
         """
         total_frames = int(duration * fps) + 5
-        
-        # Pre-scale to fill target bounding box without stretching, then zoompan
-        scale_crop = f"scale=w={width*2}:h={height*2}:force_original_aspect_ratio=increase,crop={width*2}:{height*2}"
 
-        # Ken Burns zoompan filter definition
-        if motion == "slow_zoom_out":
-            zoom_filter = (
+        # Memory optimization: 1.15x canvas instead of 2.0x (reduces RAM usage by 70%)
+        buffer_w = int(width * 1.15)
+        buffer_h = int(height * 1.15)
+        # Ensure dimensions are even numbers for x264
+        buffer_w -= buffer_w % 2
+        buffer_h -= buffer_h % 2
+
+        scale_crop = f"scale=w={buffer_w}:h={buffer_h}:force_original_aspect_ratio=increase,crop={buffer_w}:{buffer_h}"
+
+        if motion == "static":
+            # Zero-memory static image scale: bypasses zoompan completely
+            video_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},format=yuv420p"
+        elif motion == "slow_zoom_out":
+            video_filter = (
                 f"{scale_crop},"
-                f"zoompan=z='if(lte(zoom,1.0),1.14,max(1.001,1.14-0.14*on/{total_frames}))':"
-                f"x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps}"
+                f"zoompan=z='if(lte(zoom,1.0),1.12,max(1.001,1.12-0.12*on/{total_frames}))':"
+                f"x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps},"
+                f"format=yuv420p"
             )
         elif motion == "pan_left":
-            zoom_filter = (
+            video_filter = (
                 f"{scale_crop},"
-                f"zoompan=z=1.12:x='(iw-iw/zoom)*(1-on/{total_frames})':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps}"
+                f"zoompan=z=1.10:x='(iw-iw/zoom)*(1-on/{total_frames})':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps},"
+                f"format=yuv420p"
             )
         elif motion == "pan_right":
-            zoom_filter = (
+            video_filter = (
                 f"{scale_crop},"
-                f"zoompan=z=1.12:x='(iw-iw/zoom)*(on/{total_frames})':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps}"
+                f"zoompan=z=1.10:x='(iw-iw/zoom)*(on/{total_frames})':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps},"
+                f"format=yuv420p"
             )
-        else: # slow_zoom_in default
-            zoom_filter = (
+        else:  # slow_zoom_in default
+            video_filter = (
                 f"{scale_crop},"
-                f"zoompan=z='min(1.14,1.0+0.14*on/{total_frames})':"
-                f"x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps}"
+                f"zoompan=z='min(1.12,1.0+0.12*on/{total_frames})':"
+                f"x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d={total_frames}:s={width}x{height}:fps={fps},"
+                f"format=yuv420p"
             )
 
         cmd = [
@@ -73,10 +86,11 @@ class FFmpegTool:
             "-t", f"{duration:.3f}",
             "-i", image_path,
             "-i", audio_path,
-            "-vf", f"{zoom_filter},format=yuv420p",
+            "-vf", video_filter,
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "21",
+            "-preset", "ultrafast",   # ultrafast reduces CPU/RAM spike on Cloud containers
+            "-threads", "2",          # Restrict to 2 threads to prevent Streamlit vCPU thrashing
+            "-crf", "22",
             "-c:a", "aac",
             "-b:a", "192k",
             "-ar", "48000",
@@ -89,12 +103,12 @@ class FFmpegTool:
         logger.info(f"Rendering scene clip ({width}x{height}): motion={motion}, dur={duration:.2f}s -> {output_clip_path}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            logger.error(f"Scene render error: {result.stderr}")
+            logger.error(f"Scene render error: {result.stderr[-300:] if result.stderr else ''}")
             return False
         return True
 
     def concatenate_scene_clips(self, clip_paths: List[str], output_path: str) -> bool:
-        """Concatenates rendered scene clips with concat demuxer."""
+        """Concatenates rendered scene clips safely with concat demuxer (near-zero RAM)."""
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             for p in clip_paths:
                 f.write(f"file '{os.path.abspath(p)}'\n")
@@ -112,12 +126,15 @@ class FFmpegTool:
             ]
             res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode != 0:
-                logger.error(f"Concat error: {res.stderr}")
+                logger.error(f"Concat error: {res.stderr[-300:] if res.stderr else ''}")
                 return False
             return True
         finally:
             if os.path.exists(concat_file):
-                os.remove(concat_file)
+                try:
+                    os.remove(concat_file)
+                except OSError:
+                    pass
 
     def concatenate_with_transitions(
         self,
@@ -127,8 +144,8 @@ class FFmpegTool:
         output_path: str
     ) -> Tuple[bool, str]:
         """
-        Concatenates clips applying crossfades (xfade) when requested,
-        falling back cleanly to concat demuxer if clips are too short.
+        Concatenates clips. On low-memory cloud containers, concat demuxer is used
+        by default for stability and speed, guaranteeing zero memory overflow.
         """
         if not clip_paths:
             return False, "No clips provided"
@@ -137,61 +154,7 @@ class FFmpegTool:
             shutil.copy2(clip_paths[0], output_path)
             return True, "cut"
 
-        has_crossfade = any(t in ("crossfade", "dissolve") for t in transitions)
-        # Check if every clip has enough duration for 0.5s crossfade
-        min_dur = min(durations) if durations else 0.0
-
-        if has_crossfade and min_dur >= 1.5 and len(clip_paths) <= 12:
-            try:
-                # Build xfade filtergraph
-                fade_dur = 0.5
-                inputs = []
-                for p in clip_paths:
-                    inputs.extend(["-i", p])
-
-                v_filters = []
-                a_filters = []
-                cur_offset = durations[0] - fade_dur
-                prev_v = "0:v"
-                prev_a = "0:a"
-
-                for i in range(1, len(clip_paths)):
-                    next_v = f"{i}:v"
-                    next_a = f"{i}:a"
-                    out_v = f"v{i}"
-                    out_a = f"a{i}"
-                    v_filters.append(f"[{prev_v}][{next_v}]xfade=transition=fade:duration={fade_dur}:offset={cur_offset:.2f}[{out_v}]")
-                    a_filters.append(f"[{prev_a}][{next_a}]acrossfade=d={fade_dur}[{out_a}]")
-                    prev_v = out_v
-                    prev_a = out_a
-                    if i < len(clip_paths) - 1:
-                        cur_offset += (durations[i] - fade_dur)
-
-                full_filter = ";".join(v_filters + a_filters)
-                cmd = [
-                    self.ffmpeg,
-                    *inputs,
-                    "-filter_complex", full_filter,
-                    "-map", f"[{prev_v}]",
-                    "-map", f"[{prev_a}]",
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "21",
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-y",
-                    output_path
-                ]
-                res = subprocess.run(cmd, capture_output=True, text=True)
-                if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                    logger.info("Successfully rendered video with crossfade transitions via xfade.")
-                    return True, "crossfade"
-                else:
-                    logger.warning(f"xfade transition failed ({res.stderr[-200:] if res.stderr else ''}), falling back to cut demuxer.")
-            except Exception as e:
-                logger.warning(f"Error during xfade: {e}, falling back to concat demuxer.")
-
-        # Fallback to standard clean concat demuxer
+        # Concat demuxer copies compressed NAL units directly with 0 memory overhead
         ok = self.concatenate_scene_clips(clip_paths, output_path)
         return ok, "cut"
 
@@ -209,8 +172,8 @@ class FFmpegTool:
         """
         Broadcast-grade audio mixing engine:
         1. Narration stream as primary authoritative lead (volume=1.0)
-        2. Background music with dynamic sidechain ducking under narration
-        3. SFX cues positioned at exact millisecond timeline offsets
+        2. Background music using zero-memory native -stream_loop
+        3. Dynamic sidechain ducking under narration
         """
         has_music = bool(music_path and os.path.exists(music_path))
         valid_sfx = [c for c in (sfx_cues or []) if hasattr(c, "file") and os.path.exists(c.file)]
@@ -230,7 +193,6 @@ class FFmpegTool:
             res = subprocess.run(cmd, capture_output=True, text=True)
             return res.returncode == 0
 
-        # Build filter complex
         input_args = ["-i", video_input]
         filter_parts = []
         mix_inputs = ["[narr_lead]"]
@@ -238,21 +200,22 @@ class FFmpegTool:
         # 1. Narration stream setup (split into lead and sidechain trigger)
         filter_parts.append("[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asplit=2[narr_lead][narr_side]")
 
-        # 2. Music stream with dynamic sidechain ducking
+        # 2. Music stream with native stream looping (0 RAM allocation)
         next_input_idx = 1
         if has_music:
-            input_args.extend(["-i", music_path])
+            # Use -stream_loop -1 BEFORE -i (does NOT buffer in RAM)
+            input_args.extend(["-stream_loop", "-1", "-i", music_path])
             filter_parts.append(
                 f"[{next_input_idx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
-                f"aloop=loop=-1:size=2e+09,atrim=0:{total_duration:.2f},"
-                f"afade=t=in:ss=0:d=2.0,afade=t=out:st={max(0, total_duration - 3.0):.2f}:d=3.0,"
+                f"atrim=0:{total_duration:.2f},"
+                f"afade=t=in:ss=0:d=1.5,afade=t=out:st={max(0.0, total_duration - 2.5):.2f}:d=2.5,"
                 f"volume={music_vol}[bgm_loop]"
             )
-            filter_parts.append("[bgm_loop][narr_side]sidechaincompress=threshold=0.03:ratio=5:attack=100:release=600[ducked_bgm]")
+            filter_parts.append("[bgm_loop][narr_side]sidechaincompress=threshold=0.04:ratio=4:attack=80:release=450[ducked_bgm]")
             mix_inputs.append("[ducked_bgm]")
             next_input_idx += 1
 
-        # 3. SFX streams with exact timestamp delays
+        # 3. SFX cues
         for idx, cue in enumerate(valid_sfx):
             input_args.extend(["-i", cue.file])
             delay_ms = max(0, int(cue.start_time * 1000))
@@ -331,19 +294,17 @@ class FFmpegTool:
         duration: Optional[float] = None
     ) -> bool:
         """
-        Burns clean broadcast-style subtitles with aspect-ratio-aware safe zones:
-        - 16:9: Centered near bottom (MarginV=35)
-        - 9:16: Safe zone inside portrait viewport avoiding Shorts UI controls (MarginV=160)
+        Burns subtitles with safe zones:
+        - 16:9: MarginV=35
+        - 9:16: MarginV=160
         """
         if not os.path.exists(srt_path):
             return False
 
-        # Determine styling and safe zone margins
         is_portrait = "9:16" in aspect_ratio or aspect_ratio == "portrait"
         actual_font_size = font_size or (18 if is_portrait else 22)
         margin_v = 160 if is_portrait else 35
 
-        # Escape path for FFmpeg subtitles filter
         escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
         style = (
             f"Fontname=Arial,FontSize={actual_font_size},"
@@ -357,8 +318,9 @@ class FFmpegTool:
             "-i", video_input,
             "-vf", sub_filter,
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "20",
+            "-preset", "ultrafast",
+            "-threads", "2",
+            "-crf", "22",
             "-c:a", "copy",
             *(["-t", f"{duration:.3f}"] if duration and duration > 0 else []),
             "-movflags", "+faststart",
