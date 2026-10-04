@@ -2,7 +2,7 @@ import os
 import json
 import urllib.request
 import urllib.parse
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from models.scene import Scene, SceneVisualResult
 from tools.cloudflare_image_tool import ImageProvider, CloudflareFluxProvider
 from utils.filesystem import WorkspaceManager
@@ -33,7 +33,7 @@ class ImageService:
                 prompt_used=scene.visual_prompt
             )
 
-        logger.info(f"Generating visual for scene {scene.id:02d} with Cloudflare FLUX: '{scene.visual_prompt[:60]}...'")
+        logger.info(f"Generating visual for scene {scene.id:02d} with Cloudflare: '{scene.visual_prompt[:60]}...'")
 
         # 2. Try Primary: Cloudflare FLUX
         try:
@@ -41,7 +41,8 @@ class ImageService:
                 prompt=scene.visual_prompt,
                 output_path=output_path
             )
-            self._save_scene_metadata(workspace, scene, output_path)
+            scene.visual_source = "Cloudflare FLUX"
+            self._save_scene_metadata(workspace, scene, output_path, "Cloudflare FLUX")
             return SceneVisualResult(
                 scene_id=scene.id,
                 status="completed",
@@ -49,12 +50,18 @@ class ImageService:
                 prompt_used=scene.visual_prompt
             )
         except Exception as e:
-            logger.warning(f"Cloudflare FLUX visual generation failed ({e}). Deploying dynamic context search fallback...")
+            err_str = str(e)
+            logger.warning(f"Cloudflare FLUX visual generation failed ({err_str}). Deploying dynamic context search...")
+            
+            # Save quota exhaustion status for the UI
+            if "10,000 neurons" in err_str or "4006" in err_str or "429" in err_str:
+                scene.quota_exhausted = True
 
-        # 3. Dynamic Context Search Fallback (searches real images matching the prompt)
-        fallback_ok, fallback_path = self._generate_fallback_visual(scene, output_path)
+        # 3. Dynamic Context Search Fallback
+        fallback_ok, fallback_path, source_name = self._generate_fallback_visual(scene, output_path)
         if fallback_ok:
-            self._save_scene_metadata(workspace, scene, fallback_path)
+            scene.visual_source = source_name
+            self._save_scene_metadata(workspace, scene, fallback_path, source_name)
             return SceneVisualResult(
                 scene_id=scene.id,
                 status="completed",
@@ -70,7 +77,7 @@ class ImageService:
                 error="All visual generators exhausted"
             )
 
-    def _save_scene_metadata(self, workspace: WorkspaceManager, scene: Scene, visual_file: str):
+    def _save_scene_metadata(self, workspace: WorkspaceManager, scene: Scene, visual_file: str, source: str = "Cloudflare FLUX"):
         try:
             scene_meta_path = os.path.join(workspace.get_scene_dir(scene.id), "metadata.json")
             with open(scene_meta_path, "w", encoding="utf-8") as f:
@@ -80,21 +87,16 @@ class ImageService:
                     "duration": scene.duration,
                     "camera_motion": scene.camera_motion.value if hasattr(scene.camera_motion, "value") else str(scene.camera_motion),
                     "transition": scene.transition.value if hasattr(scene.transition, "value") else str(scene.transition),
-                    "visual_file": visual_file
+                    "visual_file": visual_file,
+                    "visual_source": source
                 }, f, indent=2)
         except Exception:
             pass
 
-    def _generate_fallback_visual(self, scene: Scene, output_path: str) -> tuple[bool, str]:
-        """
-        Dynamic Context Search:
-        Extracts key subjects from the prompt (e.g. heart, meditation, space)
-        and downloads a matching 1080p photo so scenes are always relevant.
-        """
+    def _generate_fallback_visual(self, scene: Scene, output_path: str) -> Tuple[bool, str, str]:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-        # Extract 2-3 most relevant topic keywords from the prompt
         stopwords = {
             "close-up", "person's", "subtle", "glowing", "around", "region", "standing",
             "cinematic", "photorealistic", "ultra", "high", "quality", "with", "from",
@@ -104,7 +106,6 @@ class ImageService:
         keywords = words[:3] if words else ["peaceful", "nature"]
         search_query = " ".join(keywords)
 
-        # 1. Search Wikimedia Commons Open Library by keyword
         try:
             wiki_url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote(search_query)}&gsrnamespace=6&format=json&prop=imageinfo&iiprop=url|mime&iiurlwidth=1920"
             req = urllib.request.Request(wiki_url, headers=headers)
@@ -123,12 +124,11 @@ class ImageService:
                                 if len(img_bytes) > 5000:
                                     with open(output_path, "wb") as f:
                                         f.write(img_bytes)
-                                    logger.info(f"Context-matched visual for '{search_query}': {output_path}")
-                                    return True, output_path
-        except Exception as e:
-            logger.warning(f"Context search query failed: {e}")
+                                    return True, output_path, f"Context Search ({search_query})"
+        except Exception:
+            pass
 
-        # 2. Backup high-resolution curated photography matching mood
+        # Backup high-res photography
         backup_url = f"https://picsum.photos/1920/1080?random={scene.id + 10}"
         try:
             req = urllib.request.Request(backup_url, headers=headers)
@@ -137,11 +137,11 @@ class ImageService:
                 if len(data) > 5000:
                     with open(output_path, "wb") as f:
                         f.write(data)
-                    return True, output_path
+                    return True, output_path, "Curated 1080p Library"
         except Exception:
-            return False, output_path
+            return False, output_path, "Failed"
 
-        return False, output_path
+        return False, output_path, "Failed"
 
     def generate_all_visuals(
         self,
