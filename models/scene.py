@@ -15,6 +15,12 @@ class TransitionType(str, Enum):
     DISSOLVE = "dissolve"
     FADE_TO_BLACK = "fade_to_black"
 
+class VisualType(str, Enum):
+    IMAGE = "image"
+    AI_GENERATED = "ai_generated"
+    STOCK_FOOTAGE = "stock_footage"
+    PROCEDURAL = "procedural"
+
 class SceneStatus(str, Enum):
     PENDING = "pending"
     AUDIO_READY = "audio_ready"
@@ -31,6 +37,7 @@ class Scene(BaseModel):
     end_time: float = 0.0
     camera_motion: CameraMotion = CameraMotion.SLOW_ZOOM_IN
     transition: TransitionType = TransitionType.CUT
+    visual_type: VisualType = VisualType.IMAGE
     audio_path: Optional[str] = None
     visual_path: Optional[str] = None
     audio_duration: Optional[float] = None
@@ -40,7 +47,7 @@ class Scene(BaseModel):
     quota_exhausted: bool = False
 
     class Config:
-        extra = "allow"  # Allows extra attributes without Pydantic validation errors
+        extra = "allow"
 
 class SceneAudioResult(BaseModel):
     scene_id: int
