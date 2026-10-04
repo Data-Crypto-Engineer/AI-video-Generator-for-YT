@@ -12,12 +12,15 @@ from utils.logging import get_logger
 
 logger = get_logger("gemini_tts_tool")
 
-class VoiceProvider(ABC):
+class TTSProvider(ABC):
     @abstractmethod
     def generate_speech(self, text: str, voice_name: str, output_path: str) -> Tuple[bool, str, float]:
         pass
 
-class GeminiTTSProvider(VoiceProvider):
+# Backward compatibility alias
+VoiceProvider = TTSProvider
+
+class GeminiTTSProvider(TTSProvider):
     def __init__(self, api_key: Optional[str] = None):
         self.api_keys = self._load_api_keys(api_key)
         self.current_key_idx = 0
@@ -62,7 +65,7 @@ class GeminiTTSProvider(VoiceProvider):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         num_keys = len(self.api_keys)
 
-        # 1. Try Gemini with Automatic Key Rotation
+        # 1. Try Gemini with Key Rotation
         for attempt in range(max(1, num_keys)):
             current_key = self._get_current_key()
             if not current_key:
