@@ -17,38 +17,44 @@ class ThumbnailService:
         concept: ThumbnailConcept,
         workspace: WorkspaceManager,
         output_width: int = 1280,
-        output_height: int = 720
+        output_height: int = 720,
+        aspect_ratio: str = "16:9"
     ) -> Tuple[bool, str]:
         """
-        Creates a high-CTR YouTube thumbnail (16:9):
-        1. Generates 16:9 base image with Cloudflare FLUX
+        Creates a high-CTR YouTube thumbnail honoring target aspect ratio:
+        1. Generates base image with Cloudflare FLUX
         2. Renders high-contrast bold typography with backing box using Pillow or FFmpeg
         """
+        is_portrait = "9:16" in aspect_ratio or aspect_ratio == "portrait"
+        actual_width = 720 if is_portrait else output_width
+        actual_height = 1280 if is_portrait else output_height
+
         output_path = workspace.get_thumbnail_path()
         raw_base_path = os.path.join(workspace.thumbnail_dir, "raw_base.png")
 
         try:
             # Step 1: Generate base visual
-            prompt = f"{concept.visual_prompt}, ultra high quality YouTube thumbnail, dramatic lighting, intense composition, 8k"
+            framing = "vertical portrait framing, centered composition, 9:16" if is_portrait else "wide 16:9 composition"
+            prompt = f"{concept.visual_prompt}, ultra high quality YouTube thumbnail, dramatic lighting, intense composition, {framing}, 8k"
             logger.info(f"Generating thumbnail base image: '{prompt[:60]}...'")
-            self.flux_provider.generate_image(prompt, raw_base_path)
+            self.flux_provider.generate_image(prompt, raw_base_path, aspect_ratio=aspect_ratio)
 
             if not os.path.exists(raw_base_path):
                 raise RuntimeError("Thumbnail base visual could not be generated")
 
-            text = (concept.overlay_text or "MUST WATCH").upper().strip()
+            text = (concept.overlay_text or "REFLECT").upper().strip()
 
             # Try Pillow first if available
             try:
                 from PIL import Image, ImageDraw, ImageFont
-                return self._render_with_pillow(raw_base_path, output_path, text, output_width, output_height)
+                return self._render_with_pillow(raw_base_path, output_path, text, actual_width, actual_height)
             except ImportError:
                 # Use FFmpeg drawtext filter
-                return self._render_with_ffmpeg(raw_base_path, output_path, text, output_width, output_height)
+                return self._render_with_ffmpeg(raw_base_path, output_path, text, actual_width, actual_height)
 
         except Exception as e:
             logger.error(f"Thumbnail creation error: {e}")
-            return self._create_fallback(concept, output_path, output_width, output_height)
+            return self._create_fallback(concept, output_path, actual_width, actual_height)
 
     def _render_with_pillow(self, raw_base: str, output_path: str, text: str, width: int, height: int) -> Tuple[bool, str]:
         from PIL import Image, ImageDraw, ImageFont
