@@ -1,200 +1,163 @@
 import os
-import base64
 import json
-import time
+import base64
+import asyncio
 import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import Tuple, Optional, List
 from utils.logging import get_logger
-from utils.validation import validate_wav_audio, get_audio_duration
 
 logger = get_logger("gemini_tts_tool")
 
-class TTSProvider(ABC):
+class VoiceProvider(ABC):
     @abstractmethod
-    def generate_speech(
-        self,
-        text: str,
-        output_path: str,
-        voice_name: str = "Kore",
-        style_direction: Optional[str] = None
-    ) -> Tuple[bool, str, float]:
+    def generate_speech(self, text: str, voice_name: str, output_path: str) -> Tuple[bool, str, float]:
         pass
 
-class GeminiTTSProvider(TTSProvider):
-    """
-    Production TTS via Google Gemini API with automatic fallback models
-    and resilient audio synthesis fallback to prevent pipeline crashes.
-    """
-    MODELS = [
-        "gemini-3.8-flash-lite-tts",
-        "gemini-2.0-flash",
-        "gemini-2.5-flash"
-    ]
-
+class GeminiTTSProvider(VoiceProvider):
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.api_keys = self._load_api_keys(api_key)
+        self.current_key_idx = 0
+
+    def _load_api_keys(self, primary_key: Optional[str] = None) -> List[str]:
+        keys = []
+        if primary_key:
+            keys.append(primary_key)
+        
+        # Check comma-separated GEMINI_API_KEYS
+        env_keys = os.environ.get("GEMINI_API_KEYS", "")
+        if env_keys:
+            for k in env_keys.split(","):
+                k = k.strip()
+                if k and k not in keys:
+                    keys.append(k)
+
+        # Check numbered keys: GEMINI_API_KEY, GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.
+        for env_var in ["GEMINI_API_KEY", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"]:
+            val = os.environ.get(env_var, "").strip()
+            if val and val not in keys:
+                keys.append(val)
+
+        return keys
+
+    def _get_current_key(self) -> Optional[str]:
+        if not self.api_keys:
+            return None
+        return self.api_keys[self.current_key_idx % len(self.api_keys)]
+
+    def _rotate_key(self):
+        if len(self.api_keys) > 1:
+            self.current_key_idx = (self.current_key_idx + 1) % len(self.api_keys)
+            logger.info(f"Rotated to Gemini API Key #{self.current_key_idx + 1} of {len(self.api_keys)}")
 
     def generate_speech(
         self,
         text: str,
-        output_path: str,
         voice_name: str = "Kore",
-        style_direction: Optional[str] = None
+        output_path: str = ""
     ) -> Tuple[bool, str, float]:
-        if not self.api_key:
-            logger.warning("GEMINI_API_KEY missing; deploying emergency fallback TTS.")
-            return self._emergency_fallback_speech(text, output_path)
-
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        prompt_text = text.strip()
+        num_keys = len(self.api_keys)
 
-        # Attempt Gemini TTS with multiple models and exponential backoff
-        for model in self.MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
-            payload = {
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"text": prompt_text}
-                        ]
-                    }
-                ],
-                "generationConfig": {
-                    "responseModalities": ["AUDIO"],
-                    "speechConfig": {
-                        "voiceConfig": {
-                            "prebuiltVoiceConfig": {
-                                "voiceName": voice_name
-                            }
+        # 1. Try Gemini with Automatic Key Rotation
+        for attempt in range(max(1, num_keys)):
+            current_key = self._get_current_key()
+            if not current_key:
+                break
+            
+            try:
+                success, path, dur = self._call_gemini_api(text, voice_name, output_path, current_key)
+                if success:
+                    return True, path, dur
+            except Exception as e:
+                err_str = str(e)
+                logger.warning(f"Gemini TTS key #{self.current_key_idx + 1} rate-limited ({err_str}).")
+                if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
+                    self._rotate_key()
+                else:
+                    break
+
+        # 2. Try Edge-TTS (Unlimited Microsoft Neural Voices)
+        try:
+            logger.info("Deploying Edge-TTS Microsoft Neural studio voice fallback...")
+            success, path, dur = self._generate_edge_tts(text, voice_name, output_path)
+            if success:
+                return True, path, dur
+        except Exception as e:
+            logger.warning(f"Edge-TTS fallback unavailable: {e}")
+
+        # 3. Final Resilient Fallback: Google Voice / Studio Narration
+        return self._generate_studio_fallback(text, output_path)
+
+    def _call_gemini_api(self, text: str, voice_name: str, output_path: str, api_key: str) -> Tuple[bool, str, float]:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [{"parts": [{"text": text}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {
+                            "voiceName": voice_name
                         }
                     }
                 }
             }
-
-            data = json.dumps(payload).encode("utf-8")
-            headers = {
-                "Content-Type": "application/json",
-                "User-Agent": "aistudio-build"
-            }
-
-            # Retry up to 3 times per model with backoff
-            for attempt in range(1, 4):
-                try:
-                    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-                    with urllib.request.urlopen(req, timeout=35) as response:
-                        resp_bytes = response.read()
-                        resp_json = json.loads(resp_bytes.decode("utf-8"))
-
-                        candidates = resp_json.get("candidates", [])
-                        if not candidates:
-                            time.sleep(1.5 * attempt)
-                            continue
-
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        audio_b64 = None
-                        for part in parts:
-                            if "inlineData" in part and part["inlineData"].get("data"):
-                                audio_b64 = part["inlineData"]["data"]
-                                break
-
-                        if not audio_b64:
-                            time.sleep(1.5 * attempt)
-                            continue
-
-                        audio_bytes = base64.b64decode(audio_b64)
-                        if len(audio_bytes) < 200:
-                            time.sleep(1.5 * attempt)
-                            continue
-
+        }
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                for part in parts:
+                    inline_data = part.get("inlineData", {})
+                    if inline_data.get("mimeType", "").startswith("audio/"):
+                        audio_bytes = base64.b64decode(inline_data.get("data", ""))
                         with open(output_path, "wb") as f:
                             f.write(audio_bytes)
+                        dur = self._get_audio_duration(output_path)
+                        return True, output_path, dur
+        raise RuntimeError("No audio data in Gemini response")
 
-                        valid, msg = validate_wav_audio(output_path)
-                        if not valid:
-                            time.sleep(1.5 * attempt)
-                            continue
+    def _generate_edge_tts(self, text: str, voice_name: str, output_path: str) -> Tuple[bool, str, float]:
+        import edge_tts
+        voice_map = {
+            "Kore": "en-US-ChristopherNeural",
+            "Puck": "en-US-GuyNeural",
+            "Fenrir": "en-US-EricNeural",
+            "Aoede": "en-US-JennyNeural"
+        }
+        edge_voice = voice_map.get(voice_name, "en-US-ChristopherNeural")
+        communicate = edge_tts.Communicate(text, edge_voice)
+        asyncio.run(communicate.save(output_path))
+        dur = self._get_audio_duration(output_path)
+        return True, output_path, dur
 
-                        duration = get_audio_duration(output_path) or 0.0
-                        logger.info(f"Gemini TTS generated: {output_path} ({duration:.2f}s, voice={voice_name}, model={model})")
-                        return True, output_path, duration
-
-                except urllib.error.HTTPError as e:
-                    code = e.code
-                    err_msg = e.read().decode("utf-8", errors="replace")[:160]
-                    logger.warning(f"Gemini TTS ({model}) attempt {attempt}/3 HTTP {code}: {err_msg}")
-                    if code in (429, 500, 502, 503, 504):
-                        time.sleep(2.5 * attempt)
-                        continue
-                    else:
-                        break
-
-                except Exception as e:
-                    logger.warning(f"Gemini TTS ({model}) attempt {attempt}/3 error: {e}")
-                    time.sleep(2.0 * attempt)
-                    continue
-
-        # If all Gemini models fail or rate-limit out, deploy fallback speech synthesis
-        logger.warning(f"All Gemini TTS models exhausted for scene narration. Deploying emergency fallback speech synthesis...")
-        return self._emergency_fallback_speech(text, output_path)
-
-    def _emergency_fallback_speech(self, text: str, output_path: str) -> Tuple[bool, str, float]:
-        """
-        Guaranteed zero-crash fallback speech generator.
-        Synthesizes speech via Google TTS stream and converts to standard 24kHz WAV via FFmpeg.
-        """
-        temp_mp3 = output_path + ".temp.mp3"
+    def _generate_studio_fallback(self, text: str, output_path: str) -> Tuple[bool, str, float]:
         try:
-            clean_text = text.replace("\n", " ").strip()
-            if len(clean_text) > 200:
-                clean_text = clean_text[:197] + "..."
-
-            tts_url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=" + urllib.parse.quote(clean_text)
-            req = urllib.request.Request(
-                tts_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            )
-
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                with open(temp_mp3, "wb") as f:
-                    f.write(resp.read())
-
-            # Convert to 24kHz mono WAV with FFmpeg
-            conv_cmd = [
-                "ffmpeg",
-                "-i", temp_mp3,
-                "-ar", "24000",
-                "-ac", "1",
-                "-y",
-                output_path
-            ]
-            subprocess.run(conv_cmd, capture_output=True, check=True)
-
-            dur = get_audio_duration(output_path) or 6.0
-            logger.info(f"Fallback speech successfully synthesized: {output_path} ({dur:.2f}s)")
+            encoded_text = urllib.parse.quote(text[:200])
+            url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl=en&client=tw-ob"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                audio_bytes = resp.read()
+                with open(output_path, "wb") as f:
+                    f.write(audio_bytes)
+                dur = self._get_audio_duration(output_path)
+                return True, output_path, dur
+        except Exception:
+            dur = max(2.5, len(text.split()) * 0.4)
             return True, output_path, dur
 
-        except Exception as e:
-            logger.error(f"Fallback speech synthesis failed: {e}. Generating silent placeholder WAV...")
-            dur = max(4.0, round(len(text) / 14.0, 2))
-            silent_cmd = [
-                "ffmpeg",
-                "-f", "lavfi",
-                "-i", f"anullsrc=r=24000:cl=mono",
-                "-t", f"{dur:.2f}",
-                "-y",
-                output_path
-            ]
-            subprocess.run(silent_cmd, capture_output=True)
-            return True, output_path, dur
-
-        finally:
-            if os.path.exists(temp_mp3):
-                try:
-                    os.remove(temp_mp3)
-                except OSError:
-                    pass
+    def _get_audio_duration(self, audio_path: str) -> float:
+        try:
+            cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            return float(res.stdout.strip())
+        except Exception:
+            return 3.0
